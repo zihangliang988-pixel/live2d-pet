@@ -428,7 +428,7 @@ class FoxChatDialog(QDialog):
         # 外层容器（圆角 + 暖色渐变背景）
         self.outer_frame = QFrame(self)
         self.outer_frame.setGeometry(0, 0, 480, 620)
-        outer.setStyleSheet(f"""
+        self.outer_frame.setStyleSheet(f"""
             QFrame {{
                 background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
                     stop:0 {FOX_LIGHT}, stop:0.5 {FOX_BG1}, stop:1 {FOX_BG2});
@@ -788,7 +788,82 @@ class FoxChatDialog(QDialog):
         self.send_btn.setEnabled(True)
         self.send_btn.setText("发送")
 
+    def _try_direct_tool(self, text):
+        """关键词检测，直接调工具（不依赖 LLM tool calling）"""
+        import re
+        from tools import _weather, _sysinfo, _myip, _quote, _fortune, _password
+
+        # 天气：包含城市名/天气关键词
+        m = re.search(r'([\u4e00-\u9fa5]{2,4})(?:的)?(?:天气|气温|温度|冷不冷|热不热|下雨|下雪|刮风)', text)
+        if m:
+            city = m.group(1)
+            # 排除非城市名
+            if city not in ('今天', '明天', '后天', '昨天', '什么', '怎么'):
+                result = _weather(city)
+                return f"{result.get('city','')}天气：{result.get('weather','')}，{result.get('temp','')}，{result.get('wind','')}"
+        if '天气' in text:
+            result = _weather('北京')
+            return f"{result.get('city','')}天气：{result.get('weather','')}，{result.get('temp','')}，{result.get('wind','')}"
+
+        if any(k in text for k in ['电脑状态', '系统状态', 'cpu', 'CPU', '内存', '性能']):
+            result = _sysinfo()
+            if isinstance(result, dict) and 'error' not in result:
+                return f"系统：{result.get('system','')}\nCPU：{result.get('cpu','')}\n内存：{result.get('memory','')}"
+
+        if any(k in text for k in ['我的IP', 'IP在哪', 'ip地址', '外网']):
+            result = _myip()
+            if isinstance(result, dict) and 'error' not in result:
+                return f"IP：{result.get('ip','')}\n归属地：{result.get('country','')} {result.get('region','')} {result.get('city','')}\n运营商：{result.get('isp','')}"
+
+        if any(k in text for k in ['来句', '语录', '鸡汤', '一言', '名言']):
+            return _quote()
+
+        if any(k in text for k in ['运势', '占卜', '运气', '抽签', '今天运气']):
+            result = _fortune()
+            if isinstance(result, dict):
+                return f"今日运势：{result.get('level','')}\n建议：{result.get('advice','')}\n幸运色：{result.get('lucky_color','')}"
+
+        if any(k in text for k in ['密码', '生成密码', '随机密码']):
+            m = re.search(r'(\d+)位', text)
+            length = int(m.group(1)) if m else 16
+            result = _password(length)
+            return f"生成的密码（{length}位）：{result.get('password','')}"
+
+        return None
+
     def _chat_with_llm(self, text):
+        # 先试直接调工具
+        tool_result = self._try_direct_tool(text)
+        if tool_result:
+            # 用 LLM 润色成自然语言
+            self.conversation.append({"role": "user", "content": text})
+            brief = [
+                {"role": "system", "content": self.conversation[0]["content"]},
+                {"role": "user", "content": text},
+                {"role": "assistant", "content": f"工具返回：{tool_result}\n\n请用可爱的语气把结果告诉用户"}
+            ]
+            def on_response(response):
+                cleaned = response.strip()
+                self._add_msg("assistant", cleaned)
+                self.conversation.append({"role": "assistant", "content": cleaned})
+                self.send_btn.setEnabled(True)
+                self.send_btn.setText("发送")
+            def on_error(err):
+                self._add_msg("assistant", tool_result)  # 裸数据兜底
+                self.conversation.append({"role": "assistant", "content": tool_result})
+                self.send_btn.setEnabled(True)
+                self.send_btn.setText("发送")
+            try:
+                import ollama
+                t = LLMChatThread(brief)
+                t.finished.connect(on_response)
+                t.error.connect(on_error)
+                t.start()
+            except:
+                on_error(None)
+            return
+
+        # 正常走 LLM
         self.conversation.append({"role": "user", "content": text})
 
         def on_response(response):
