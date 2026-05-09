@@ -76,6 +76,56 @@ class LLMChatThread(QThread):
 
 
 # ======================================================================
+# 带工具调用的 LLM 对话线程
+# ======================================================================
+class ToolChatThread(QThread):
+    finished = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, messages, tools, model="qwen2.5:7b"):
+        super().__init__()
+        self.messages = messages
+        self.tools = tools
+        self.model = model
+
+    def run(self):
+        try:
+            import ollama
+            from tools import execute_tool_call
+
+            # 第一轮：带工具调用
+            response = ollama.chat(
+                model=self.model,
+                messages=self.messages,
+                tools=self.tools,
+                stream=False,
+                options={"temperature": 0.7, "num_predict": 512}
+            )
+
+            msg = response['message']
+
+            # 如果有工具调用，执行并返回结果
+            if msg.get('tool_calls'):
+                for tc in msg['tool_calls']:
+                    result = execute_tool_call(tc)
+                    self.messages.append({"role": "tool", "content": result})
+
+                # 第二轮：拿最终回复
+                response2 = ollama.chat(
+                    model=self.model,
+                    messages=self.messages,
+                    stream=False,
+                    options={"temperature": 0.7, "num_predict": 512}
+                )
+                self.finished.emit(response2['message']['content'])
+            else:
+                self.finished.emit(msg['content'])
+
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+# ======================================================================
 # 命令执行线程
 # ======================================================================
 class CommandThread(QThread):
@@ -296,8 +346,10 @@ class FoxChatDialog(QDialog):
         self.voice_mode = False
         self._voice_pressed = False
 
-        self.conversation = [{"role": "system",
-            "content": "你是桌宠助手仙狐，一个可爱亲切的虚拟角色。你可以帮用户管理文件（打开、创建、删除、移动），也可以日常聊天。用可爱活泼的语气，适当用表情符号，回复尽量简短（不超过100字）。回复请使用中文。"}]
+        # 加载性格配置
+        self.character = self._load_character()
+        system_prompt = self._build_system_prompt()
+        self.conversation = [{"role": "system", "content": system_prompt}]
 
         self._setup_ui()
 
@@ -311,6 +363,62 @@ class FoxChatDialog(QDialog):
             self.llm_parser = LLMCommandParser(model_name="qwen2.5:7b")
         except Exception as e:
             print(f"LLM init: {e}")
+
+    def _load_character(self):
+        """加载性格配置"""
+        default = {
+            "name": "仙狐",
+            "emoji": "🦊",
+            "title": "小狐仙",
+            "称呼用户": "主人",
+            "性格": {"类型": "温柔元气", "描述": "像小狐狸一样温柔可爱"},
+            "语气风格": {"语调": "活泼可爱", "表情符号": True},
+            "知识设定": {"身份": "住在电脑里的小狐狸精"}
+        }
+        try:
+            char = json.load(open('character.json', 'r', encoding='utf-8'))
+            print("[仙狐] 加载性格配置 ✓")
+            return char
+        except Exception as e:
+            print(f"[仙狐] 使用默认性格配置: {e}")
+            return default
+
+    def _build_system_prompt(self):
+        """基于性格配置构建系统提示词"""
+        c = self.character
+        name = c.get('name', '仙狐')
+        emoji = c.get('emoji', '🦊')
+        title = c.get('title', '小狐仙')
+        call_user = c.get('称呼用户', '主人')
+        personality = c.get('性格', {}).get('描述', '温柔可爱')
+        tone = c.get('语气风格', {}).get('语调', '活泼可爱')
+        use_emoji = c.get('语气风格', {}).get('表情符号', True)
+        identity = c.get('知识设定', {}).get('身份', '桌宠助手')
+        rules = c.get('行为规则', [])
+        emoji_rule = "适当使用表情符号" if use_emoji else "不要使用表情符号"
+
+        prompt = f"""你是{name}，一个{identity}。你的称号是{title}。
+
+## 性格
+{personality}
+
+## 语气
+整体{tone}。称呼用户为「{call_user}」。{emoji_rule}。
+回复使用中文，尽量简短（不超过100字）。
+
+## 行为规则
+"""
+        for r in rules:
+            prompt += f"- {r}\n"
+
+        prompt += f"""
+## 能力说明
+你可以使用的工具：天气查询、系统状态查询、IP查询、每日一言、今日运势、生成密码。
+当用户问「天气」「IP」「运势」「系统」「一言」等关键词时，主动调用对应工具。
+你也可以普通聊天、帮用户管理文件。
+
+现在，以{name}的身份和{call_user}对话吧！{emoji}"""
+        return prompt
 
     def _setup_ui(self):
         # 外层容器（圆角 + 暖色渐变背景）
@@ -694,8 +802,10 @@ class FoxChatDialog(QDialog):
 
         try:
             import ollama
+            from tools import get_ollama_tools
             recent = self.conversation[-10:]
-            self.llm_thread = LLMChatThread(recent)
+            tools = get_ollama_tools()
+            self.llm_thread = ToolChatThread(recent, tools)
             self.llm_thread.finished.connect(on_response)
             self.llm_thread.error.connect(on_error)
             self.llm_thread.start()
@@ -714,7 +824,7 @@ class FeatureOverview(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("📋 功能概览")
-        self.setFixedSize(440, 520)
+        self.setFixedSize(480, 620)
         self.setWindowFlags(Qt.Dialog | Qt.WindowCloseButtonHint | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
 
@@ -762,13 +872,18 @@ class FeatureOverview(QDialog):
 
         # 功能卡片
         cards = [
-            ("💬 AI 聊天", "和仙狐自由对话，随便聊什么都行~ 她会用 Qwen 大模型给你智能回复"),
-            ("🗣️ 语音输入", "点击输入框左边的 🎤 按钮切换语音模式，长按 T 键说话，松开发送"),
-            ("📁 打开程序", "说「打开 记事本」「打开 计算器」「打开 画图」就能启动程序"),
-            ("📄 文件管理", "创建、删除、移动、查看文件，自然语言指令就搞定"),
-            ("🎨 仙狐陪伴", "Live2D 仙狐会陪在你桌面上，可以看到她的动画互动"),
-            ("🔄 拖拽移动", "鼠标左键按住窗口可拖动到任意位置"),
-            ("📐 窗口缩放", "拖动右下角手柄可调整窗口大小"),
+            ("💬 AI 聊天", "和仙狐自由对话，她会智能回复你"),
+            ("🗣️ 语音输入", "点击 🎤 切换语音模式，长按 T 键说话"),
+            ("🌤 天气查询", "说「北京天气」仙狐马上告诉你"),
+            ("📊 系统状态", "说「电脑状态」查看 CPU、内存占用"),
+            ("📍 IP 查询", "说「我的IP」查看外网地址和归属地"),
+            ("💬 每日一言", "说「来句鸡汤」获取随机励志语录"),
+            ("🎲 今日运势", "说「今天运势」赛博占卜一下"),
+            ("🔐 密码生成", "说「生成密码」得到随机强密码"),
+            ("📁 打开程序", "说「打开 记事本」「打开 计算器」"),
+            ("📄 文件管理", "自然语言创建、删除、移动文件"),
+            ("🎨 仙狐陪伴", "Live2D 仙狐会陪在你桌面上~ "),
+            ("🔄 拖拽 & 缩放", "鼠标左键拖拽窗口，右下角缩放"),
         ]
 
         for icon_title, desc in cards:
