@@ -287,15 +287,16 @@ class FoxPet(QWidget):
             }}
         """)
 
-        for text, callback in [
+        for item in [
             ("💬 开始聊天", self._open_chat),
             ("📋 功能概览", self._show_functions),
             None,
             ("👋 关闭", self._confirm_exit),
         ]:
-            if text is None:
+            if item is None:
                 menu.addSeparator()
             else:
+                text, callback = item
                 a = QAction(text, self)
                 a.triggered.connect(callback)
                 menu.addAction(a)
