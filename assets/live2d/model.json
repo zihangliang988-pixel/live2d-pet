@@ -1,0 +1,12 @@
+{
+	"version":"Sample 1.0.0",
+	"model":"model.moc",
+	"textures":[
+		"Texture2D/texture_00.png"
+	],
+	"layout":{
+		"center_y": -0.7,
+		"image_height": 1170
+	},
+	"name":"22"
+}

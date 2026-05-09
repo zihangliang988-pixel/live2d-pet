@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<title>Live2D Pet</title>
+<style>
+*{margin:0;padding:0}
+html,body{width:100%;height:100%;background:transparent;overflow:hidden}
+canvas{display:block;width:100%;height:100%;cursor:pointer}
+#status{
+  position:fixed;bottom:6px;left:50%;transform:translateX(-50%);
+  background:rgba(255,255,255,0.92);
+  border:1px solid rgba(150,120,220,0.4);border-radius:12px;
+  padding:3px 14px;font:12px/1.6 'Microsoft YaHei',sans-serif;
+  color:#666;white-space:nowrap;opacity:0;transition:opacity .3s;pointer-events:none;z-index:10
+}
+#status.show{opacity:1}
+</style></head><body>
+<canvas id="c"></canvas>
+<div id="status">🦊 Senko 来啦~</div>
+
+<!-- Load Cubism Core SDK -->
+<script src="live2dcubismcore.min.js"></script>
+<script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+
+<script>
+(function(){
+'use strict';
+
+const cvs=document.getElementById('c');
+const statusEl=document.getElementById('status');
+let c2=null, gl=null;
+let statusTimer, animTime=0, blinkTimer=0;
+let blinking=false, particles=[], animId=null;
+let live2dReady=false, canvas2dMode=false;
+let model=null, moc=null, textures=[], texturesReady=false;
+let bufs=[], texCount=0;
+let hitArea={x:0,y:0,w:0,h:0};
+
+// ===== Setup =====
+function resize(){
+  const dpr=window.devicePixelRatio||1;
+  cvs.width=220*dpr; cvs.height=300*dpr;
+  cvs.style.width='220px'; cvs.style.height='300px';
+  if(c2) c2.setTransform(dpr,0,0,dpr,0,0);
+}
+resize();
+window.addEventListener('resize',resize);
+
+function status(t){
+  statusEl.textContent=t; statusEl.classList.add('show');
+  clearTimeout(statusTimer);
+  statusTimer=setTimeout(()=>statusEl.classList.remove('show'),2500);
+}
+
+function particlesAt(x,y,n){
+  const clrs=['#ffcc66','#ff99cc','#cc99ff','#ff6699','#aaddff','#88ffaa'];
+  for(let i=0;i<n;i++)particles.push({
+    x,y,vx:(Math.random()-0.5)*6,vy:-Math.random()*6-2,
+    life:1,size:Math.random()*7+3,color:clrs[i%clrs.length]
+  });
+}
+
+// ===== Motion Loader =====
+function parseMotion3Json(json){
+  // Parse Cubism 3 motion3.json into parameter curves
+  const curves=[];
+  for(const curve of json.Meta.Curves||[]){
+    const id=curve.Target||'';
+    const pts=curve.FadeInTime!==undefined?[curve.FadeInTime]:[];
+    for(const seg of curve.Segments||[]){
+      if(typeof seg==='number')pts.push(seg);
+    }
+    if(pts.length>0)curves.push({target:id,segments:pts});
+  }
+  return {
+    duration:json.Meta.DurationSeconds||3,
+    fps:json.Meta.Fps||30,
+    loop:json.Meta.Loop!==false,
+    curves
+  };
+}
+
+async function loadMotions(){
+  const motionFiles=[
+    '../senko/motions/Idle.json',
+    '../senko/motions/Anim_1.json',
+    '../senko/motions/Sleeping.json',
+    '../senko/motions/Singing.json'
+  ];
+  const motions=[];
+  for(const f of motionFiles){
+    try{
+      const r=await fetch(f);
+      const j=await r.json();
+      motions.push(parseMotion3Json(j));
+    }catch(e){/* skip */}
+  }
+  return motions;
+}
+
+// ===== Live2D WebGL Initialization =====
+async function initLive2D(){
+  // Verify Cubism Core
+  if(typeof Live2DCubismCore==='undefined'){
+    console.log('Cubism Core not available');
+    return false;
+  }
+
+  try{
+    // 1. Load model.json
+    const mjr=await fetch('../senko/model.json');
+    const mj=await mjr.json();
+    const refs=mj.FileReferences;
+    if(!refs||!refs.Moc) throw new Error('No Moc ref');
+
+    // 2. Load moc3 binary
+    const moc3r=await fetch('../senko/'+refs.Moc);
+    const moc3b=new Uint8Array(await moc3r.arrayBuffer());
+    moc=Live2DCubismCore.Moc.fromArrayBuffer(moc3b);
+    if(!moc) throw new Error('Moc.fromArrayBuffer failed');
+
+    model=Live2DCubismCore.Model.fromMoc(moc);
+    if(!model) throw new Error('Model.fromMoc failed');
+
+    console.log('Senko model:', model.drawables.count, 'drawables,',
+                model.parameters.count, 'params');
+
+    // 3. Setup WebGL
+    c2=cvs.getContext('2d');
+    gl=null;
+    try{ gl=cvs.getContext('webgl',{alpha:true,premultipliedAlpha:true,antialias:true}); }catch(e){}
+    if(!gl){ console.log('No WebGL'); return false; }
+
+    gl.enable(gl.BLEND);
+    gl.blendFuncSeparate(gl.ONE,gl.ONE_MINUS_SRC_ALPHA,gl.ONE,gl.ONE_MINUS_SRC_ALPHA);
+
+    // 4. Load texture(s)
+    textures=[];
+    const texRefs=refs.Textures||[];
+    for(let i=0;i<texRefs.length;i++){
+      await loadTexture(texRefs[i],i);
+    }
+    texturesReady=true;
+
+    // 5. Setup shaders
+    const vs='attribute vec2 p;attribute vec2 u;varying vec2 uv;void main(){gl_Position=vec4(p,0,1);uv=u;}';
+    const fs=[
+      'precision highp float;varying vec2 uv;',
+      'uniform sampler2D t[',String(textures.length),'];',
+      'uniform int ti;uniform float a;',
+      'void main(){',
+      '  vec4 c=texture2D(t[ti],uv);',
+      '  gl_FragColor=vec4(c.rgb,c.a*a);',
+      '}'
+    ].join('');
+
+    // Use fixed texture (index 0) since Senko has 1 texture
+    const fs2='precision highp float;varying vec2 uv;uniform sampler2D t;uniform float a;void main(){vec4 c=texture2D(t,uv);gl_FragColor=vec4(c.rgb,c.a*a);}';
+
+    function cs(s,ty){const r=gl.createShader(ty);gl.shaderSource(r,s);gl.compileShader(r);return r;}
+    const prog=gl.createProgram();
+    gl.attachShader(prog,cs(vs,gl.VERTEX_SHADER));
+    gl.attachShader(prog,cs(fs2,gl.FRAGMENT_SHADER));
+    gl.linkProgram(prog);
+    if(!gl.getProgramParameter(prog,gl.LINK_STATUS)){
+      console.error('Shader link error:',gl.getProgramInfoLog(prog));
+      return false;
+    }
+    gl.useProgram(prog);
+
+    const aP=gl.getAttribLocation(prog,'p');
+    const aU=gl.getAttribLocation(prog,'u');
+    const uT=gl.getUniformLocation(prog,'t');
+    const uA=gl.getUniformLocation(prog,'a');
+
+    // 6. Get canvas info
+    const dw=model.drawables;
+    const canvasW=2048, canvasH=2048;
+
+    // 7. Create VBOs
+    bufs=[];
+    for(let i=0;i<dw.count;i++){
+      const vc=dw.vertexCounts[i];
+      const verts=dw.vertexPositions[i];
+      const uvs=dw.vertexUvs[i];
+      const idx=dw.indices[i];
+      const ori=dw.orders[i];
+      const tidx=dw.textureIndices[i];
+
+      // Transform coordinates to NDC
+      const data=new Float32Array(vc*4);
+      for(let j=0;j<vc;j++){
+        data[j*4]=(verts[j*2]/canvasW)*2-1;
+        data[j*4+1]=((canvasH-verts[j*2+1])/canvasH)*2-1;
+        data[j*4+2]=uvs[j*2];
+        data[j*4+3]=1-uvs[j*2+1];
+      }
+
+      const vb=gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER,vb);
+      gl.bufferData(gl.ARRAY_BUFFER,data,gl.DYNAMIC_DRAW);
+
+      const ib=gl.createBuffer();
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ib);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,new Uint16Array(idx),gl.STATIC_DRAW);
+
+      bufs.push({vb,ib,vc,ic:idx.length,order:ori,texIdx:tidx});
+    }
+    // Sort by draw order
+    bufs.sort((a,b)=>a.order-b.order);
+
+    console.log('WebGL Ready!',bufs.length,'drawables sorted');
+    live2dReady=true;
+    document.title='live2d_ready';
+
+    // 8. Load motions
+    const motions=await loadMotions();
+    if(motions.length>0){
+      startMotionPlayer(motions);
+    }
+
+    // 9. Start render loop
+    renderLoopGL(aP,aU,uT,uA,dw);
+    return true;
+
+  }catch(e){
+    console.error('Live2D init error:',e);
+    return false;
+  }
+}
+
+function loadTexture(texPath,index){
+  return new Promise((ok,err)=>{
+    const img=new Image();
+    img.onload=()=>{
+      const tex=gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D,tex);
+      gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,img);
+      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR_MIPMAP_LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+      gl.generateMipmap(gl.TEXTURE_2D);
+      textures[index]=tex;
+      texCount++;
+      ok();
+    };
+    img.onerror=()=>{
+      console.error('Failed to load texture:',texPath);
+      ok(); // Continue even if texture fails
+    };
+    img.src='../senko/'+texPath;
+  });
+}
+
+// ===== Motion Player =====
+let motionPlayer=null;
+let currentMotion=null;
+let motionTime=0;
+
+function startMotionPlayer(motions){
+  if(motions.length===0)return;
+  let mi=0;
+  
+  function playNext(){
+    currentMotion=motions[mi];
+    motionTime=0;
+    mi=(mi+1)%motions.length;
+  }
+  playNext();
+
+  motionPlayer=setInterval(()=>{
+    if(!currentMotion||!model)return;
+    motionTime+=1/30;
+    if(motionTime>=currentMotion.duration){
+      if(currentMotion.loop) motionTime=0;
+      else playNext();
+    }
+    // Apply motion to parameters
+    applyMotion(currentMotion,motionTime);
+  },1000/30);
+}
+
+function applyMotion(motion,time){
+  const params=model.parameters;
+  const timeNorm=time/motion.duration;
+
+  // Simple animation: apply a subset of motion curves
+  for(let c=0;c<motion.curves.length&&c<params.count;c++){
+    const curve=motion.curves[c];
+    const segs=curve.segments;
+    if(segs.length<3)continue;
+
+    // Simple linear interpolation through segments
+    const totalTime=motion.duration;
+    const segCount=(segs.length-1)/3;
+    const segDuration=totalTime/segCount;
+
+    const segIdx=Math.min(Math.floor(time/segDuration),segCount-1);
+    const segT=(time-segIdx*segDuration)/segDuration;
+
+    const baseI=segIdx*3+1;
+    const v0=segs[baseI];
+    const v1=segs[Math.min(baseI+3,segs.length-1)];
+
+    // Find matching parameter
+    for(let p=0;p<params.count;p++){
+      const pid=params.ids[p];
+      if(pid===curve.target||pid.endsWith(curve.target.split(':').pop()||'')){
+        const val=v0+(v1-v0)*segT;
+        params.values[p]=Math.max(0,Math.min(1,val));
+        break;
+      }
+    }
+  }
+  model.update();
+}
+
+// ===== Model Parameter Update =====
+function updateParams(time,dw){
+  const params=model.parameters;
+
+  for(let i=0;i<params.count;i++){
+    const id=params.ids[i];
+
+    // Eye blink
+    if(id==='ParamEyeLOpen'||id==='ParamEyeROpen'){
+      let val=1;
+      blinkTimer+=1/60;
+      if(!blinking&&blinkTimer>2+Math.random()*3){blinking=true;blinkTimer=0;}
+      if(blinking){
+        const bv=blinkTimer*12;
+        if(bv<1)val=1-bv;
+        else if(bv<2){const t=bv-1;val=t;}
+        else if(bv<2.5)val=1;
+        else blinking=false;
+      }
+      params.values[i]=val;
+    }
+
+    // Body angle
+    if(id==='ParamBodyAngleX') params.values[i]=Math.sin(time*0.3)*3;
+    if(id==='ParamAngleX') params.values[i]=Math.sin(time*0.5)*5;
+    if(id==='ParamAngleY') params.values[i]=Math.sin(time*0.2)*3;
+
+    // Breath
+    if(id==='ParamBreath') params.values[i]=0.5+Math.sin(time*2.5)*0.3;
+    if(id==='ParamMouthOpenY') params.values[i]=Math.max(0,0.2+Math.sin(time*4)*0.15);
+
+    // Tail wag
+    if(id==='ParamBustX'||id==='ParamZ') params.values[i]=Math.sin(time*2)*2;
+  }
+  model.update();
+}
+
+// ===== WebGL Render Loop =====
+function renderLoopGL(aP,aU,uT,uA,dw){
+  let frame=0;
+
+  function loop(){
+    animTime+=1/60; frame++;
+    const dpr=window.devicePixelRatio||1;
+    gl.viewport(0,0,220*dpr,300*dpr);
+    gl.clearColor(0,0,0,0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    // Update params every frame
+    updateParams(animTime,dw);
+
+    // Bind texture
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D,textures[0]||gl.createTexture());
+    gl.uniform1i(uT,0);
+
+    gl.enableVertexAttribArray(aP);
+    gl.enableVertexAttribArray(aU);
+
+    const dpr2=dpr;
+
+    for(let i=0;i<dw.count;i++){
+      const opacity=dw.opacities[i];
+      if(opacity<0.005) continue;
+
+      const vc=dw.vertexCounts[i];
+      const verts=dw.vertexPositions[i];
+      const uvs=dw.vertexUvs[i];
+
+      // Rebuild vertex data (positions may change due to parameters)
+      const data=new Float32Array(vc*4);
+      const cw=2048, ch=2048;
+      // Scale to fit viewport (show ~60% of model)
+      const fitScale=0.48;
+      const ox=0, oy=-0.05;
+
+      for(let j=0;j<vc;j++){
+        data[j*4]=((verts[j*2]/cw)*2-1)*fitScale+ox;
+        data[j*4+1]=((ch-verts[j*2+1])/ch*2-1)*fitScale+oy;
+        data[j*4+2]=uvs[j*2];
+        data[j*4+3]=1-uvs[j*2+1];
+      }
+
+      const buf=bufs[i];
+      if(!buf) continue;
+
+      gl.bindBuffer(gl.ARRAY_BUFFER,buf.vb);
+      gl.bufferData(gl.ARRAY_BUFFER,data,gl.DYNAMIC_DRAW);
+      gl.vertexAttribPointer(aP,2,gl.FLOAT,false,16,0);
+      gl.vertexAttribPointer(aU,2,gl.FLOAT,false,16,8);
+
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,buf.ib);
+      gl.uniform1f(uA,opacity);
+      gl.drawElements(gl.TRIANGLES,buf.ic,gl.UNSIGNED_SHORT,0);
+    }
+
+    gl.disableVertexAttribArray(aP);
+    gl.disableVertexAttribArray(aU);
+    animId=requestAnimationFrame(loop);
+  }
+  loop();
+}
+
+// ===== Canvas 2D Fallback =====
+function startCanvas2D(){
+  canvas2dMode=true;
+  c2=cvs.getContext('2d');
+
+  function loop(){
+    const dpr=window.devicePixelRatio||1;
+    const w=220,h=300;
+    c2.clearRect(0,0,w,h);
+    animTime+=1/60;
+
+    blinkTimer+=1/60;
+    if(!blinking&&blinkTimer>2.5+Math.random()*4){blinking=true;blinkTimer=0;}
+    if(blinking&&blinkTimer>0.12){blinking=false;blinkTimer=0;}
+
+    drawSenko2D(w,h);
+
+    // Particles
+    for(let i=particles.length-1;i>=0;i--){
+      const p=particles[i];
+      p.x+=p.vx;p.y+=p.vy;p.vy+=0.15;p.life-=0.025;
+      if(p.life<=0){particles.splice(i,1);continue;}
+      c2.globalAlpha=Math.max(0,p.life);
+      c2.fillStyle=p.color;
+      c2.beginPath();c2.arc(p.x,p.y,p.size,0,Math.PI*2);c2.fill();
+    }
+    c2.globalAlpha=1;
+
+    animId=requestAnimationFrame(loop);
+  }
+
+  setTimeout(loop,500);
+}
+
+function drawSenko2D(w,h){
+  const swayX=Math.sin(animTime*1.8)*1.5;
+  const swayY=Math.sin(animTime*3.2)*0.6;
+  const s=Math.min(w,h)/300;
+
+  c2.save();
+  c2.translate(w/2+swayX,h/2-10+swayY);
+  c2.scale(s,s);
+
+  // Twintails
+  c2.beginPath();c2.ellipse(-22,-58,18,34,-0.3,0,Math.PI*2);
+  c2.fillStyle='#e89060';c2.fill();
+  c2.beginPath();c2.ellipse(22,-58,18,34,0.3,0,Math.PI*2);
+  c2.fill();
+
+  // Body
+  c2.beginPath();c2.ellipse(0,24,28,34,0,0,Math.PI*2);
+  c2.fillStyle='#f0e8f0';c2.fill();
+
+  // Collar
+  c2.beginPath();c2.moveTo(-14,2);c2.quadraticCurveTo(0,8,14,2);
+  c2.quadraticCurveTo(0,10,-14,2);c2.fillStyle='#fff';c2.fill();
+
+  // Bow
+  c2.beginPath();c2.moveTo(12,-2);c2.quadraticCurveTo(22,-10,18,-2);
+  c2.quadraticCurveTo(22,6,12,-2);c2.fillStyle='#d04060';c2.fill();
+
+  // Arms
+  c2.beginPath();c2.ellipse(-30,16,6,12,-0.2,0,Math.PI*2);
+  c2.fillStyle='#ffe4d6';c2.fill();
+  c2.beginPath();c2.ellipse(30,16,6,12,0.2,0,Math.PI*2);
+  c2.fill();
+
+  // Head
+  c2.beginPath();c2.arc(0,-28,36,0,Math.PI*2);
+  c2.fillStyle='#ffe4d6';c2.fill();
+
+  // Hair
+  c2.beginPath();c2.ellipse(0,-36,37,30,0,Math.PI,0);
+  c2.fillStyle='#e89060';c2.fill();
+
+  // Bangs
+  c2.beginPath();c2.moveTo(-32,-28);c2.quadraticCurveTo(-22,-58,0,-54);
+  c2.quadraticCurveTo(22,-58,32,-28);c2.quadraticCurveTo(10,-46,0,-44);
+  c2.quadraticCurveTo(-10,-46,-32,-28);c2.fill();
+
+  // Fox ears
+  c2.beginPath();c2.moveTo(-28,-48);c2.lineTo(-34,-70);c2.lineTo(-24,-55);c2.closePath();
+  c2.fillStyle='#e89060';c2.fill();
+  c2.beginPath();c2.moveTo(-27,-50);c2.lineTo(-32,-66);c2.lineTo(-24,-55);c2.closePath();
+  c2.fillStyle='#f5c8a0';c2.fill();
+  c2.beginPath();c2.moveTo(24,-48);c2.lineTo(30,-70);c2.lineTo(20,-55);c2.closePath();
+  c2.fillStyle='#e89060';c2.fill();
+  c2.beginPath();c2.moveTo(22,-50);c2.lineTo(28,-66);c2.lineTo(20,-55);c2.closePath();
+  c2.fillStyle='#f5c8a0';c2.fill();
+
+  // Eyes
+  const bh=blinking?0.05:1;
+  c2.save();c2.translate(-12,-25);c2.scale(1,bh);
+  c2.beginPath();c2.ellipse(0,0,8,8,0,0,Math.PI*2);
+  c2.fillStyle='#fff';c2.fill();
+  if(!blinking){
+    c2.beginPath();c2.arc(0,1,4.5,0,2*Math.PI);
+    c2.fillStyle='#d04878';c2.fill();
+    c2.beginPath();c2.arc(-2,-1.5,2,0,2*Math.PI);
+    c2.fillStyle='#fff';c2.fill();
+  }
+  c2.restore();
+
+  c2.save();c2.translate(12,-25);c2.scale(1,bh);
+  c2.beginPath();c2.ellipse(0,0,8,8,0,0,Math.PI*2);
+  c2.fillStyle='#fff';c2.fill();
+  if(!blinking){
+    c2.beginPath();c2.arc(0,1,4.5,0,2*Math.PI);
+    c2.fillStyle='#d04878';c2.fill();
+    c2.beginPath();c2.arc(-2,-1.5,2,0,2*Math.PI);
+    c2.fillStyle='#fff';c2.fill();
+  }
+  c2.restore();
+
+  // Blush
+  c2.beginPath();c2.ellipse(-20,-18,6,3,0,0,Math.PI*2);
+  c2.fillStyle='rgba(255,160,160,0.3)';c2.fill();
+  c2.beginPath();c2.ellipse(20,-18,6,3,0,0,Math.PI*2);
+  c2.fill();
+
+  // Mouth
+  c2.beginPath();c2.arc(0,-10,3,0.15,Math.PI-0.15);
+  c2.strokeStyle='#d06070';c2.lineWidth=1.8;c2.stroke();
+
+  // Tail
+  c2.beginPath();c2.moveTo(-16,56);c2.quadraticCurveTo(-40,60,-44,40);
+  c2.quadraticCurveTo(-52,20,-36,16);c2.quadraticCurveTo(-44,32,-34,46);
+  c2.quadraticCurveTo(-22,52,-16,56);c2.fillStyle='#e8a060';c2.fill();
+
+  // Legs
+  c2.beginPath();c2.ellipse(-10,56,6,10,0,0,Math.PI*2);
+  c2.fillStyle='#ffe4d6';c2.fill();
+  c2.beginPath();c2.ellipse(10,56,6,10,0,0,Math.PI*2);
+  c2.fill();
+
+  c2.restore();
+}
+
+// ===== Click events =====
+cvs.addEventListener('click',e=>{
+  const r=cvs.getBoundingClientRect();
+  particlesAt(e.clientX-r.left,e.clientY-r.top,20);
+  status('🦊 Hello~~');
+});
+cvs.addEventListener('mouseenter',()=>statusEl.classList.add('show'));
+cvs.addEventListener('mouseleave',()=>setTimeout(()=>statusEl.classList.remove('show'),1000));
+
+// ===== Start =====
+(async function(){
+  // Load local Cubism Core first, then try online
+  const ok=await initLive2D();
+  if(!ok){
+    console.log('WebGL failed, falling back to Canvas2D');
+    startCanvas2D();
+  }
+})();
+})();
+</script>
+</body></html>

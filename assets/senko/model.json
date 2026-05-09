@@ -1,0 +1,24 @@
+{
+  "Version": 3,
+  "Name": "Senko",
+  "FileReferences": {
+    "Moc": "model.moc3",
+    "Textures": [
+      "tex/texture_00.png"
+    ],
+    "Physics": "physics.json",
+    "Motions": {
+      "Idle": [{"Name":"Idle","File":"motions/Idle.json","Weight":1}],
+      "Tap": [{"Name":"Anim","File":"motions/Anim_1.json","Weight":1}],
+      "Taphead": [
+        {"Name":"Sing","File":"motions/Singing.json","Weight":1},
+        {"Name":"Sleep","File":"motions/Sleeping.json","Weight":1}
+      ]
+    }
+  },
+  "HitAreas": [{"Name":"head","Id":"head"}],
+  "Groups": [
+    {"Target":"Parameter","Name":"EyeBlink","Text":""},
+    {"Target":"Parameter","Name":"LipSync","Text":""}
+  ]
+}

@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>桌宠</title>
+<style>
+*{margin:0;padding:0}
+html,body{width:100%;height:100%;overflow:hidden;background:transparent!important}
+</style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@mdi/font@latest/css/materialdesignicons.min.css">
+</head>
+<body>
+<div id="app"></div>
+<script src="live2dcubismcore.min.js"></script>
+<script src="live2d.min.js"></script>
+<script>
+(function(){
+  'use strict';
+  // 等 Vue 挂载后通过 API 直接加模型
+  var base = window.location.origin;
+  var MODEL_URL = base + '/senko/model.json';
+  var loaded = false;
+  var attempts = 0;
+  
+  function loadModel() {
+    if (loaded) return;
+    attempts++;
+    if (window.App && window.App.addModel && !window.App.models.length) {
+      try {
+        var modelId = window.App.addModel(MODEL_URL);
+        console.log('[Pet] Model loaded: #' + modelId);
+        loaded = true;
+        hideUI();
+        return;
+      } catch(e) {
+        console.warn('[Pet] addModel failed:', e);
+      }
+    }
+    if (attempts < 60) setTimeout(loadModel, 1000);
+  }
+  
+  function hideUI() {
+    document.body.style.setProperty('background', 'transparent', 'important');
+    var app = document.getElementById('app');
+    if (app) {
+      app.style.setProperty('display', 'none', 'important');
+    }
+    document.querySelectorAll('canvas').forEach(function(c){
+      c.style.setProperty('display', 'block', 'important');
+      c.style.setProperty('visibility', 'visible', 'important');
+    });
+  }
+  
+  // 延迟等 Vue 初始化
+  setTimeout(loadModel, 2000);
+  // 超时保底隐藏 UI
+  setTimeout(hideUI, 8000);
+  setTimeout(hideUI, 15000);
+})();
+</script>
+<link rel="stylesheet" href="css/chunk-vendors.59dd9dd0.css">
+<link rel="stylesheet" href="css/app.224bbf60.css">
+<script defer src="js/chunk-vendors.515940ba.js"></script>
+<script defer src="js/app.751a26ef.js"></script>
+</body>
+</html>

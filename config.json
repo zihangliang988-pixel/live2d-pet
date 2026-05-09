@@ -1,0 +1,20 @@
+{
+  "user_preferences": {
+    "desktop_path": "C:/Users/46282/Desktop",
+    "default_folder": "D:/桌宠/文件",
+    "voice_language": "zh-CN",
+    "voice_enabled": true,
+    "confirmation_required": ["delete", "move", "rename"]
+  },
+  "commands": {
+    "open": ["打开", "进入", "启动", "运行"],
+    "create": ["创建", "新建", "建一个"],
+    "delete": ["删除", "删掉", "删了"],
+    "move": ["移动", "移到", "放到"],
+    "view": ["查看", "看看", "显示"]
+  },
+  "desktop_state": {
+    "shortcuts": [],
+    "recent_files": []
+  }
+}

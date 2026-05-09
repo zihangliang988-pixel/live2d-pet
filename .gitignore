@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# QtWebEngine cache
+*_Cache/
+*_cache/
+
+# Logs
+error.log
+test_stderr.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Generated test files
+_check*.py
+_debug*.py
+_server*.py
+_verify*.py
+_*.py
