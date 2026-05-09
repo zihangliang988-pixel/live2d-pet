@@ -163,24 +163,46 @@ class FileManager:
         return None
 
     def _find_file(self, name: str) -> Optional[str]:
-        """在桌面、默认文件夹和常见位置查找文件或文件夹"""
+        """在桌面、默认文件夹和常见位置查找文件或文件夹（支持模糊匹配）"""
         search_paths = [
             self.desktop_path,
             self.default_folder,
+            os.path.expanduser('~'),  # C:\Users\用户名
             "D:/",
+            "C:/",
         ]
+
+        # 去掉 文件夹/目录 后缀，便于模糊匹配
+        search_name = name
+        for suffix in ['文件夹', '目录', '文件']:
+            if search_name.endswith(suffix) and len(search_name) > len(suffix):
+                search_name = search_name[:-len(suffix)]
+                break
 
         for search_path in search_paths:
             if not os.path.exists(search_path):
                 continue
-            path_obj = Path(search_path)
             try:
-                for item in path_obj.iterdir():
-                    if name.lower() in item.name.lower() or item.name.lower() == name.lower():
-                        return str(item)
-            except:
+                for root, dirs, files in os.walk(search_path):
+                    # 限制搜索深度，避免遍历整个 C 盘
+                    depth = root.replace(search_path, '').count(os.sep)
+                    if depth > 3:
+                        del dirs[:]  # 不继续深入
+                        continue
+
+                    for item_name in dirs + files:
+                        # 完全匹配
+                        if item_name.lower() == search_name.lower() or item_name.lower() == name.lower():
+                            return os.path.join(root, item_name)
+                        # 部分匹配
+                        if len(search_name) >= 2 and search_name.lower() in item_name.lower():
+                            return os.path.join(root, item_name)
+            except PermissionError:
+                continue
+            except Exception:
                 continue
 
+        # 直接作为路径尝试
         if os.path.exists(name):
             return name
 

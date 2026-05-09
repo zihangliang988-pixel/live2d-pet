@@ -74,104 +74,129 @@ JSON 格式：
             
             content = response['message']['content']
             
-            # 提取 JSON（可能包含 markdown 代码块）
             import re
-            json_match = re.search(r'\{.*\}', content, re.DOTALL)
-            if json_match:
-                content = json_match.group()
+            import json as json_mod
             
-            # 解析 JSON
-            import json
-            result = json.loads(content)
+            # 尝试多种解析方式
+            parsed = None
             
-            # 验证结果
-            if 'action' not in result:
-                return {"success": False, "message": "解析失败"}
+            # 方式1：直接从 markdown 代码块提取
+            block = re.search(r'```(?:json)?\s*\n?([\s\S]*?)```', content)
+            if block:
+                try:
+                    parsed = json_mod.loads(block.group(1).strip())
+                except Exception:
+                    pass
             
-            return {
-                "success": result['action'] != 'unknown',
-                "action": result['action'],
-                "target": result.get('target'),
-                "destination": result.get('destination'),
-                "directory": result.get('directory'),  # 新增：指定目录
-                "content": result.get('content'),      # 新增：文件内容
-                "message": result.get('message', '')
-            }
+            # 方式2：提取第一个 {…} 对象
+            if not parsed:
+                brace = re.search(r'\{[^{}]*"action"[^{}]*\}', content)
+                if brace:
+                    try:
+                        parsed = json_mod.loads(brace.group())
+                    except Exception:
+                        pass
             
+            if parsed and 'action' in parsed:
+                result = {
+                    "success": parsed['action'] != 'unknown',
+                    "action": parsed['action'],
+                    "target": parsed.get('target'),
+                    "destination": parsed.get('destination'),
+                    "directory": parsed.get('directory'),
+                    "content": parsed.get('content'),
+                    "message": parsed.get('message', '')
+                }
+                print(f"[LLM解析] {result}")
+                return result
+
+            # LLM没返回JSON → 回退规则匹配
+            return self._fallback_parse(text)
+
         except Exception as e:
             print(f"❌ 大模型解析失败：{e}")
             return self._fallback_parse(text)
     
     def _fallback_parse(self, text: str) -> dict:
-        """回退到规则匹配"""
-        text_lower = text.lower()
-        
-        # 打开
+        """回退到规则匹配（支持复杂中文指令）"""
+        import re
+
+        # ---- 模式1：在「目录」里面「动作」「目标」 ----
+        m = re.search(r'在\s*([\u4e00-\u9fa5\w\\/]+?)\s*(?:里|里面|目录|文件夹)?\s*'
+                      r'(打开|创建|新建|删除|删掉|查看|看看|移动)\s*'
+                      r'(?:命名为?|一个)?\s*([\u4e00-\u9fa5\w.\\/]+?)?(?:的)?'
+                      r'(?:文件|文件夹)?\s*$', text)
+        if m:
+            directory = m.group(1).strip()
+            action_cn = m.group(2)
+            target = m.group(3).strip() if m.group(3) else ''
+            action_map = {'打开': 'open', '创建': 'create', '新建': 'create',
+                         '删除': 'delete', '删掉': 'delete',
+                         '查看': 'view', '看看': 'view', '移动': 'move'}
+            action_en = action_map.get(action_cn, 'open')
+            if action_en == 'open':
+                return {"success": True, "action": "open", "target": directory,
+                        "directory": None, "destination": None, "content": None,
+                        "message": f"正在打开{directory}..."}
+            if action_en == 'create' and target:
+                return {"success": True, "action": "create", "target": target,
+                        "directory": directory, "destination": None, "content": None,
+                        "message": f"在{directory}中创建{target}"}
+            if action_en == 'create' and not target:
+                return {"success": True, "action": "create", "target": directory,
+                        "directory": None, "destination": None, "content": None,
+                        "message": f"正在创建{directory}..."}
+
+        # ---- 模式2：打开 ----
         for kw in ["打开", "进入", "启动", "运行"]:
-            if kw in text_lower:
+            if kw in text:
                 target = text.replace(kw, "").strip()
                 if target:
-                    return {
-                        "success": True,
-                        "action": "open",
-                        "target": target,
-                        "message": f"正在打开 {target}..."
-                    }
-        
-        # 创建
+                    return {"success": True, "action": "open", "target": target,
+                            "directory": None, "destination": None, "content": None,
+                            "message": f"正在打开{target}..."}
+
+        # ---- 模式3：创建/新建 ----
         for kw in ["创建", "新建"]:
-            if kw in text_lower:
+            if kw in text:
                 target = text.replace(kw, "").strip()
+                target = re.sub(r'^(?:命名为?|一个)\s*', '', target)
                 if target:
-                    return {
-                        "success": True,
-                        "action": "create",
-                        "target": target,
-                        "message": f"已创建 {target}"
-                    }
-        
-        # 删除
+                    return {"success": True, "action": "create", "target": target,
+                            "directory": None, "destination": None, "content": None,
+                            "message": f"已创建{target}"}
+
+        # ---- 模式4：删除 ----
         for kw in ["删除", "删掉"]:
-            if kw in text_lower:
+            if kw in text:
                 target = text.replace(kw, "").strip()
                 if target:
-                    return {
-                        "success": True,
-                        "action": "delete",
-                        "target": target,
-                        "message": f"已删除 {target}"
-                    }
-        
-        # 移动
-        if "移动" in text_lower and "到" in text_lower:
+                    return {"success": True, "action": "delete", "target": target,
+                            "directory": None, "destination": None, "content": None,
+                            "message": f"已删除{target}"}
+
+        # ---- 模式5：移动 ----
+        if "移动" in text and "到" in text:
             parts = text.split("移动", 1)[1].split("到", 1)
             if len(parts) == 2:
-                return {
-                    "success": True,
-                    "action": "move",
-                    "target": parts[0].strip(),
-                    "destination": parts[1].strip(),
-                    "message": "已移动文件"
-                }
-        
-        # 查看
+                return {"success": True, "action": "move",
+                        "target": parts[0].strip(), "destination": parts[1].strip(),
+                        "directory": None, "content": None,
+                        "message": "已移动文件"}
+
+        # ---- 模式6：查看 ----
         for kw in ["查看", "看看"]:
-            if kw in text_lower:
+            if kw in text:
                 target = text.replace(kw, "").strip()
                 if target:
-                    return {
-                        "success": True,
-                        "action": "view",
-                        "target": target,
-                        "message": "正在查看..."
-                    }
-        
-        return {
-            "success": False,
-            "action": "unknown",
-            "target": None,
-            "message": "我不太明白，请试试：打开、创建、删除、移动、查看"
-        }
+                    return {"success": True, "action": "view", "target": target,
+                            "directory": None, "destination": None, "content": None,
+                            "message": f"正在查看{target}..."}
+
+        return {"success": False, "action": "unknown",
+                "target": None, "directory": None,
+                "destination": None, "content": None,
+                "message": "我不太明白，请试试：打开、创建、删除、移动、查看"}
 
 
 # 测试
