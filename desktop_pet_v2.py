@@ -331,6 +331,9 @@ class FoxChatDialog(QDialog):
         self.setFixedSize(480, 620)
         self.setWindowFlags(Qt.Dialog | Qt.WindowCloseButtonHint | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
+        # 拖拽状态
+        self._drag_pos = QPoint()
+        self._dragging = False
 
         # 主背景
         self.setStyleSheet(f"""
@@ -423,8 +426,8 @@ class FoxChatDialog(QDialog):
 
     def _setup_ui(self):
         # 外层容器（圆角 + 暖色渐变背景）
-        outer = QFrame(self)
-        outer.setGeometry(0, 0, 480, 620)
+        self.outer_frame = QFrame(self)
+        self.outer_frame.setGeometry(0, 0, 480, 620)
         outer.setStyleSheet(f"""
             QFrame {{
                 background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
@@ -434,7 +437,7 @@ class FoxChatDialog(QDialog):
             }}
         """)
 
-        layout = QVBoxLayout(outer)
+        layout = QVBoxLayout(self.outer_frame)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
 
@@ -813,6 +816,32 @@ class FoxChatDialog(QDialog):
         except ImportError:
             on_error("ollama 未安装")
 
+    # ---- 拖拽支持 ----
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._dragging = True
+            self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._dragging:
+            self.move(event.globalPos() - self._drag_pos)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._dragging = False
+            event.accept()
+
+    # ---- 阻止回车关闭对话框 ----
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            # 输入框的回车由 returnPressed 处理，不传播到 dialog
+            if self.input_edit.hasFocus():
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
     def closeEvent(self, event):
         self._key_thread_running = False
         super().closeEvent(event)
@@ -830,7 +859,7 @@ class FeatureOverview(QDialog):
         self.setAttribute(Qt.WA_TranslucentBackground)
 
         outer = QFrame(self)
-        outer.setGeometry(0, 0, 440, 520)
+        outer.setGeometry(0, 0, 480, 620)
         outer.setStyleSheet(f"""
             QFrame {{
                 background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
@@ -840,12 +869,15 @@ class FeatureOverview(QDialog):
             }}
         """)
 
-        layout = QVBoxLayout(outer)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(12)
+        outer_layout = QVBoxLayout(outer)
+        outer_layout.setContentsMargins(24, 20, 24, 12)
+        outer_layout.setSpacing(10)
 
-        # 关闭按钮
-        top = QHBoxLayout()
+        # 顶部：关闭 + 标题
+        top_frame = QFrame()
+        top_frame.setStyleSheet("background: transparent;")
+        top = QHBoxLayout(top_frame)
+        top.setContentsMargins(0, 0, 0, 0)
         close_btn = QPushButton("✕")
         close_btn.setFixedSize(26, 26)
         close_btn.setCursor(Qt.PointingHandCursor)
@@ -863,15 +895,38 @@ class FeatureOverview(QDialog):
         close_btn.clicked.connect(self.close)
         top.addWidget(close_btn)
         top.addStretch()
-        layout.addLayout(top)
 
         title = QLabel("🦊 仙狐桌宠功能一览")
         title.setFont(QFont("Microsoft YaHei UI", 16, QFont.Bold))
         title.setStyleSheet(f"color: {FOX_ORANGE}; background: transparent;")
         title.setAlignment(Qt.AlignCenter)
-        layout.addWidget(title)
+        top.addWidget(title)
+        top.addStretch()
+        outer_layout.addWidget(top_frame)
 
-        # 功能卡片
+        # 可滚动区域
+        from PyQt5.QtWidgets import QScrollArea
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet(f"""
+            QScrollArea {{ background: transparent; border: none; }}
+            QScrollBar:vertical {{
+                background: transparent; width: 6px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: rgba(255,140,66,0.3);
+                border-radius: 3px; min-height: 30px;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+        """)
+
+        cards_widget = QWidget()
+        cards_widget.setStyleSheet("background: transparent;")
+        cl = QVBoxLayout(cards_widget)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(8)
+
         cards = [
             ("💬 AI 聊天", "和仙狐自由对话，她会智能回复你"),
             ("🗣️ 语音输入", "点击 🎤 切换语音模式，长按 T 键说话"),
@@ -879,12 +934,12 @@ class FeatureOverview(QDialog):
             ("📊 系统状态", "说「电脑状态」查看 CPU、内存占用"),
             ("📍 IP 查询", "说「我的IP」查看外网地址和归属地"),
             ("💬 每日一言", "说「来句鸡汤」获取随机励志语录"),
-            ("🎲 今日运势", "说「今天运势」赛博占卜一下"),
+            ("🎲 今日运势", "说「今天运势」赛博占卜"),
             ("🔐 密码生成", "说「生成密码」得到随机强密码"),
             ("📁 打开程序", "说「打开 记事本」「打开 计算器」"),
             ("📄 文件管理", "自然语言创建、删除、移动文件"),
-            ("🎨 仙狐陪伴", "Live2D 仙狐会陪在你桌面上~ "),
-            ("🔄 拖拽 & 缩放", "鼠标左键拖拽窗口，右下角缩放"),
+            ("🎨 仙狐陪伴", "Live2D 仙狐陪在你桌面上~"),
+            ("🔄 拖拽 & 缩放", "左键拖拽窗口，右下角缩放"),
         ]
 
         for icon_title, desc in cards:
@@ -896,24 +951,23 @@ class FeatureOverview(QDialog):
                     border: 1px solid {FOX_BORDER};
                 }}
             """)
-            cl = QVBoxLayout(card)
-            cl.setContentsMargins(14, 10, 14, 10)
-            cl.setSpacing(2)
-
+            card_cl = QVBoxLayout(card)
+            card_cl.setContentsMargins(14, 8, 14, 8)
+            card_cl.setSpacing(2)
             n = QLabel(icon_title)
             n.setFont(QFont("Microsoft YaHei UI", 12, QFont.Bold))
             n.setStyleSheet(f"color: {FOX_ORANGE}; background: transparent;")
-
             d = QLabel(desc)
             d.setFont(QFont("Microsoft YaHei UI", 10))
             d.setStyleSheet(f"color: {FOX_SUBTEXT}; background: transparent;")
             d.setWordWrap(True)
+            card_cl.addWidget(n)
+            card_cl.addWidget(d)
+            cl.addWidget(card)
 
-            cl.addWidget(n)
-            cl.addWidget(d)
-            layout.addWidget(card)
-
-        layout.addStretch()
+        cl.addStretch()
+        scroll.setWidget(cards_widget)
+        outer_layout.addWidget(scroll, stretch=1)
 
         close_all = QPushButton("知道啦 ✨")
         close_all.setFixedHeight(40)
@@ -934,7 +988,26 @@ class FeatureOverview(QDialog):
             }}
         """)
         close_all.clicked.connect(self.close)
-        layout.addWidget(close_all)
+        outer_layout.addWidget(close_all)
+
+    # ---- 拖拽支持 ----
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._dragging = True
+            self._drag_start = event.globalPos() - self.frameGeometry().topLeft()
+            event.accept()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if getattr(self, '_dragging', False):
+            self.move(event.globalPos() - self._drag_start)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._dragging = False
+            event.accept()
+        super().mouseReleaseEvent(event)
 
 
 # ======================================================================

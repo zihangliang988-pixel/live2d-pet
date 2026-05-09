@@ -291,11 +291,16 @@ def test_feature_text():
     expected_items = [
         'AI 聊天',
         '语音输入',
+        '天气查询',
+        '系统状态',
+        'IP 查询',
+        '每日一言',
+        '今日运势',
+        '密码生成',
         '打开程序',
         '文件管理',
         '仙狐陪伴',
-        '拖拽移动',
-        '窗口缩放',
+        '拖拽',
     ]
     
     for item in expected_items:
