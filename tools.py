@@ -50,10 +50,13 @@ def execute_tool_call(tool_call):
     if name in _tool_registry:
         try:
             result = _tool_registry[name]['fn'](**args)
-            return json.dumps({"result": result}, ensure_ascii=False)
+            # 直接返回结果，不要嵌套在 {"result": ...} 中
+            if isinstance(result, dict):
+                return json.dumps(result, ensure_ascii=False)
+            return str(result)
         except Exception as e:
             return json.dumps({"error": str(e)}, ensure_ascii=False)
-    return json.dumps({"error": f"未知工具: {name}"})
+    return json.dumps({"error": f"未知工具：{name}"})
 
 
 # ======================================================================

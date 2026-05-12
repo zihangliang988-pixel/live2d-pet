@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 桌宠 v9 - 仙狐主题 · 明亮丝滑
-右键菜单：开始聊天 / 功能概览 / 关闭
+右键菜单:开始聊天 / 功能概览 / 关闭
 """
 
 import sys, os, json, threading, time as time_module
@@ -29,7 +29,7 @@ from PyQt5.QtWebEngineWidgets import QWebEngineView
 from file_manager import FileManager
 
 # ======================================================================
-# 配色 · 暖阳橙（仙狐主题）
+# 配色 · 暖阳橙(仙狐主题)
 # ======================================================================
 FOX_ORANGE = "#FF8C42"
 FOX_PEACH = "#FFB07C"
@@ -81,17 +81,20 @@ class LLMChatThread(QThread):
 class ToolChatThread(QThread):
     finished = pyqtSignal(str)
     error = pyqtSignal(str)
+    reminder_scheduled = pyqtSignal(str, int)  # (提醒文本, 分钟数)
 
-    def __init__(self, messages, tools, model="qwen2.5:7b"):
+    def __init__(self, messages, tools, conversation_ref=None, model="qwen2.5:7b"):
         super().__init__()
         self.messages = messages
         self.tools = tools
+        self.conversation_ref = conversation_ref  # 主线程对话历史引用
         self.model = model
 
     def run(self):
         try:
             import ollama
             from tools import execute_tool_call
+            import json as json_mod
 
             # 第一轮：带工具调用
             response = ollama.chat(
@@ -108,7 +111,28 @@ class ToolChatThread(QThread):
             if msg.get('tool_calls'):
                 for tc in msg['tool_calls']:
                     result = execute_tool_call(tc)
-                    self.messages.append({"role": "tool", "content": result})
+                    tool_name = tc['function']['name']
+                    # Ollama 需要 name 字段来识别是哪个工具的返回
+                    self.messages.append({"role": "tool", "name": tool_name, "content": result})
+                    # 回写到主线程对话历史
+                    if self.conversation_ref is not None:
+                        self.conversation_ref.append({"role": "tool", "name": tool_name, "content": result})
+
+                    # 检查是否有提醒工具的调用
+                    if tc['function']['name'] == 'set_reminder':
+                        try:
+                            args = json_mod.loads(tc['function']['arguments'])
+                            remind_text = args.get('text', '时间到了！')
+                            remind_minutes = int(args.get('minutes', 5))
+                            self.reminder_scheduled.emit(remind_text, remind_minutes)
+                        except Exception:
+                            pass
+
+                # 添加一个引导消息，让 LLM 用对话式语气回复
+                self.messages.append({
+                    "role": "assistant",
+                    "content": "收到工具返回的信息了，现在请用温柔可爱的语气自然地告诉用户，像一个真实的朋友聊天一样。不要机械地罗列数据，要把结果融入对话中，适当加入关心的话语和表情符号。"
+                })
 
                 # 第二轮：拿最终回复
                 response2 = ollama.chat(
@@ -155,7 +179,7 @@ class FoxPet(QWidget):
 
     def _setup_ui(self):
         self.setWindowFlags(
-            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+            Qt.FramelessWindowHint | Qt.Tool
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setCursor(Qt.PointingHandCursor)
@@ -180,7 +204,7 @@ class FoxPet(QWidget):
 
         layout.addWidget(self.webview, stretch=1)
 
-        # 名称标签（仙狐风格）
+        # 名称标签(仙狐风格)
         name_label = QLabel("🦊 仙狐")
         name_label.setAlignment(Qt.AlignCenter)
         name_label.setFont(QFont("Microsoft YaHei UI", 11, QFont.Bold))
@@ -259,7 +283,7 @@ class FoxPet(QWidget):
             self._last_click_time = time_module.time()
             event.accept()
 
-    # ---- 右键菜单（3项） ----
+    # ---- 右键菜单(3项) ----
     def _show_context_menu(self, pos):
         menu = QMenu(self)
         menu.setStyleSheet(f"""
@@ -314,7 +338,7 @@ class FoxPet(QWidget):
     def _confirm_exit(self):
         from PyQt5.QtWidgets import QMessageBox
         reply = QMessageBox.question(
-            self, "🦊 仙狐", "真的要走吗… 我会想你的 😢",
+            self, "🦊 仙狐", "真的要走吗... 我会想你的 😢",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         if reply == QMessageBox.Yes:
@@ -322,7 +346,7 @@ class FoxPet(QWidget):
 
 
 # ======================================================================
-# 聊天对话框 · 仙狐主题（明亮丝滑）
+# 聊天对话框 · 仙狐主题(明亮丝滑)
 # ======================================================================
 class FoxChatDialog(QDialog):
     def __init__(self, parent=None, initial_text=None):
@@ -344,9 +368,14 @@ class FoxChatDialog(QDialog):
 
         self.file_manager = FileManager()
         self.llm_parser = None
+        self.llm_thread = None
+        self.cmd_thread = None
         self._init_llm()
 
-        # 语音模式：False=文字输入, True=长按T说话
+        # 最近打开的文件夹(用于后续操作)
+        self._last_opened_folder = None
+
+        # 语音模式:False=文字输入, True=长按T说话
         self.voice_mode = False
         self._voice_pressed = False
 
@@ -401,14 +430,27 @@ class FoxChatDialog(QDialog):
         rules = c.get('行为规则', [])
         emoji_rule = "适当使用表情符号" if use_emoji else "不要使用表情符号"
 
-        prompt = f"""你是{name}，一个{identity}。你的称号是{title}。
+        prompt = f"""你是{name},一个{identity}。你的称号是{title}。
 
 ## 性格
 {personality}
 
 ## 语气
 整体{tone}。称呼用户为「{call_user}」。{emoji_rule}。
-回复使用中文，尽量简短（不超过100字）。
+回复使用中文，尽量简短 (不超过 150 字)。
+
+## 对话风格
+- 像一个真实的朋友一样聊天，不要机械地罗列数据
+- 使用工具后，把结果融入对话中，自然地告诉用户
+- 适当加入关心的话语和可爱的语气词（呢、呀、哦、啦）
+- 如果是天气信息，可以给出贴心的建议（如"记得带伞哦"）
+- 如果是系统信息，用轻松的语气解释
+- 如果是运势，用鼓励的语气
+
+## 回复示例（仅供参考，不要照搬）
+- 天气查询：把天气、温度、风速等信息融入对话，给出贴心建议
+- IP 查询：轻松愉快地告诉用户 IP 和归属地
+- 运势查询：用鼓励的语气，加上幸运色等细节
 
 ## 行为规则
 """
@@ -417,7 +459,7 @@ class FoxChatDialog(QDialog):
 
         prompt += f"""
 ## 能力说明
-你可以使用的工具：天气查询、系统状态查询、IP查询、每日一言、今日运势、生成密码。
+你可以使用的工具：天气查询、系统状态查询、IP 查询、每日一言、今日运势、生成密码、定时提醒。
 当用户问「天气」「IP」「运势」「系统」「一言」等关键词时，主动调用对应工具。
 你也可以普通聊天、帮用户管理文件。
 
@@ -425,7 +467,7 @@ class FoxChatDialog(QDialog):
         return prompt
 
     def _setup_ui(self):
-        # 外层容器（圆角 + 暖色渐变背景）
+        # 外层容器(圆角 + 暖色渐变背景)
         self.outer_frame = QFrame(self)
         self.outer_frame.setGeometry(0, 0, 480, 620)
         self.outer_frame.setStyleSheet(f"""
@@ -502,7 +544,7 @@ class FoxChatDialog(QDialog):
             }}
         """)
         self._add_msg("assistant",
-            "你好呀！我是小狐仙 🦊✨\n\n有什么可以帮你的？试试：\n"
+            "你好呀!我是小狐仙 🦊✨\n\n有什么可以帮你的?试试:\n"
             "• 打开 记事本\n• 打开 计算器\n• 创建 test.txt\n• 随便聊聊天~")
         layout.addWidget(self.chat_edit, stretch=1)
 
@@ -519,7 +561,7 @@ class FoxChatDialog(QDialog):
         input_layout.setContentsMargins(6, 6, 6, 6)
         input_layout.setSpacing(6)
 
-        # 语音切换按钮（在输入框左边）
+        # 语音切换按钮(在输入框左边)
         self.mode_btn = QPushButton("🎤")
         self.mode_btn.setFixedSize(38, 38)
         self.mode_btn.setCursor(Qt.PointingHandCursor)
@@ -528,7 +570,7 @@ class FoxChatDialog(QDialog):
         self.mode_btn.clicked.connect(self._toggle_voice_mode)
         input_layout.addWidget(self.mode_btn)
 
-        # 语音提示标签（仅语音模式显示）
+        # 语音提示标签(仅语音模式显示)
         self.voice_hint = QLabel("长按 T 说话")
         self.voice_hint.setFont(QFont("Microsoft YaHei UI", 10))
         self.voice_hint.setStyleSheet(f"color: {FOX_ORANGE}; font-weight: bold; background: transparent;")
@@ -539,7 +581,7 @@ class FoxChatDialog(QDialog):
 
         # 文字输入框
         self.input_edit = QLineEdit()
-        self.input_edit.setPlaceholderText("输入消息…")
+        self.input_edit.setPlaceholderText("输入消息...")
         self.input_edit.setFont(QFont("Microsoft YaHei UI", 12))
         self.input_edit.setStyleSheet(f"""
             QLineEdit {{
@@ -587,7 +629,7 @@ class FoxChatDialog(QDialog):
 
         layout.addWidget(input_frame)
 
-        # 启动键盘监听（语音模式用 T 键）
+        # 启动键盘监听(语音模式用 T 键)
         self._start_key_listener()
 
     def _update_mode_btn_style(self):
@@ -634,7 +676,7 @@ class FoxChatDialog(QDialog):
             self.mode_btn.setToolTip("切换到语音输入")
 
     def _start_key_listener(self):
-        """全局键盘监听（T键用于语音）"""
+        """全局键盘监听(T键用于语音)"""
         self._key_thread_running = True
 
         def listen_keys():
@@ -668,7 +710,16 @@ class FoxChatDialog(QDialog):
 
         def do_voice():
             try:
-                from voice import VoiceProcessor
+                from voice import VoiceProcessor, get_microphone_help_text
+
+                # 先检查语音是否可用，不可用则给出友好提示
+                help_text = get_microphone_help_text()
+                if help_text:
+                    QTimer.singleShot(0, lambda: self._add_msg("assistant",
+                        f"😅 {help_text}"))
+                    QTimer.singleShot(0, lambda: self._on_voice_text(None))
+                    return
+
                 voice = VoiceProcessor()
                 text = voice.listen(timeout=5)
                 QTimer.singleShot(0, lambda: self._on_voice_text(text))
@@ -758,62 +809,186 @@ class FoxChatDialog(QDialog):
         else:
             self._chat_with_llm(text)
 
+    def _resolve_context_directory(self, directory_str):
+        """解析上下文目录引用，将"这个文件夹"等转换为实际路径"""
+        context_phrases = ['这个文件夹', '当前文件夹', '刚才打开的文件夹', '刚才的文件夹']
+        if directory_str in context_phrases:
+            return self._last_opened_folder
+        return directory_str
+
     def _execute_command(self, result):
-        action = result["action"]
-        target = result.get("target", "")
-        dest = result.get("destination", "")
-        directory = result.get("directory", "")
+        # 边界检查:result 为 None 或缺少 action
+        if not result or not result.get("action"):
+            self._add_msg("assistant", "😅 命令解析失败,请重试")
+            self.send_btn.setEnabled(True)
+            self.send_btn.setText("发送")
+            return
+
+        action = result.get("action")
+        target_type = result.get("target_type")  # 新增：目标类型
+
+        target = (result.get("target") or "").strip()
+        dest = (result.get("destination") or "").strip()
+        directory = (result.get("directory") or "").strip()
+        
+        # 解析上下文目录引用
+        directory = self._resolve_context_directory(directory)
 
         try:
-            if action == "open":
-                r = self.file_manager.open_file(target)
+            # 边界检查:target 为空
+            if action in ["open", "delete", "view"] and not target:
+                r = {"success": False, "message": "请告诉我要操作的文件名或程序名"}
+
+            elif action == "open":
+                # 传递 target_type 给 file_manager，优化搜索策略
+                r = self.file_manager.open_file(target, target_type=target_type)
+                # 如果打开的是文件夹，记录下来供后续操作使用
+                if r.get("success") and r.get("is_dir"):
+                    self._last_opened_folder = r.get("path")
+                    # 根据类型给出更精确的反馈
+                    self._add_msg("assistant", f"✅ 已打开文件夹：{target}")
+                    return
+
             elif action == "create":
-                r = self.file_manager.create_file(target, directory=directory or None)
+                # 边界检查：创建需要文件名/文件夹名
+                if not target:
+                    r = {"success": False, "message": "请告诉我要创建的文件名或文件夹名"}
+                else:
+                    # 如果没有指定目录，使用最近打开的文件夹
+                    if not directory and self._last_opened_folder:
+                        directory = self._last_opened_folder
+                    
+                    # 根据 target_type 选择创建文件还是文件夹
+                    if target_type == 'folder':
+                        r = self.file_manager.create_folder(target, directory=directory or None)
+                    else:
+                        # 默认创建文件（包括 target_type 为 file 或 unknown）
+                        r = self.file_manager.create_file(target, directory=directory or None)
+
             elif action == "delete":
-                r = self.file_manager.delete_file(target)
-            elif action == "move" and dest:
-                r = self.file_manager.move_file(target, dest)
+                # 解析上下文目录（优先级：directory 字段 > _last_opened_folder）
+                search_dir = None
+                
+                # 优先级 1：解析 directory 字段中的上下文引用
+                if directory:
+                    search_dir = self._resolve_context_directory(directory)
+                
+                # 优先级 2：使用最近打开的文件夹
+                if not search_dir and self._last_opened_folder:
+                    search_dir = self._last_opened_folder
+                
+                r = self.file_manager.delete_file(target, directory=search_dir)
+                
+                # 如果带了目录还是没找到，取消目录限制再搜一次
+                if not r["success"] and search_dir:
+                    r2 = self.file_manager.delete_file(target, directory=None)
+                    if r2["success"]:
+                        r = r2
+                elif not r["success"] and not search_dir:
+                    # 没有上下文目录，给出友好提示
+                    r["message"] = f"没找到 '{target}' 哦。请先打开一个文件夹，或者说清楚文件位置~"
+
+            elif action == "move":
+                if not target:
+                    r = {"success": False, "message": "请告诉我要移动的文件"}
+                elif not dest:
+                    r = {"success": False, "message": "请告诉我目标位置"}
+                else:
+                    r = self.file_manager.move_file(target, dest)
+
             elif action == "view":
                 r = self.file_manager.view_file(target)
+
             else:
-                r = {"success": False, "message": "我不知道这个命令😅"}
+                # 未知 action(含废弃的 "tool" 分支)
+                r = {"success": False, "message": "我不懂这个命令😅"}
         except Exception as e:
-            r = {"success": False, "message": f"执行出错：{str(e)[:50]}"}
+            r = {"success": False, "message": f"执行出错:{str(e)[:50]}"}
 
         if r["success"]:
-            self._add_msg("assistant", f"✅ {r['message']}")
+            # 根据目标类型给出更精确的反馈
+            if target_type == 'folder':
+                self._add_msg("assistant", f"✅ 已{self._action_to_cn(action)}文件夹：{target}")
+            elif target_type == 'file':
+                self._add_msg("assistant", f"✅ 已{self._action_to_cn(action)}文件：{target}")
+            elif target_type == 'program':
+                self._add_msg("assistant", f"✅ 已启动程序：{target}")
+            else:
+                self._add_msg("assistant", f"✅ {r['message']}")
         else:
             self._add_msg("assistant", f"😅 {r['message']}")
 
         self.send_btn.setEnabled(True)
         self.send_btn.setText("发送")
+    
+    def _action_to_cn(self, action):
+        """将英文action转换为中文"""
+        action_map = {
+            'open': '打开',
+            'create': '创建',
+            'delete': '删除',
+            'move': '移动',
+            'view': '查看'
+        }
+        return action_map.get(action, action)
 
     def _try_direct_tool(self, text):
-        """关键词检测，直接调工具（不依赖 LLM tool calling）"""
+        """关键词检测,直接调工具(不依赖 LLM tool calling)"""
         import re
-        from tools import _weather, _sysinfo, _myip, _quote, _fortune, _password
+        from tools import _weather, _sysinfo, _myip, _quote, _fortune, _password, _remind
 
-        # 天气：包含城市名/天气关键词
+        # 提醒:检测"提醒/记得/叫我/闹钟"关键词
+        if any(k in text for k in ['提醒', '记得', '叫我', '闹钟']):
+            m = re.search(r'(\d+)\s*(?:分|分钟|秒|小时)', text)
+            minutes = int(m.group(1)) if m else 5
+            # 如果是秒,转成分钟(向上取整)
+            if m and '秒' in m.group(0):
+                minutes = max(1, (int(m.group(1)) + 59) // 60)
+            # 提取提醒内容(去掉关键词和时间部分)
+            for kw in ['提醒我', '提醒', '记得', '叫我']:
+                if kw in text:
+                    reminder_text = text.split(kw, 1)[1].strip()
+                    break
+            else:
+                reminder_text = text
+            reminder_text = re.sub(r'\d+\s*(?:分|分钟|秒|小时)\s*(?:后|以后)?', '', reminder_text).strip()
+            if not reminder_text:
+                reminder_text = "时间到了！"
+
+            result = _remind(reminder_text, minutes)
+            # 直接调度实际定时器
+            def fire():
+                self._add_msg("assistant", f"⏰ 提醒：{reminder_text}")
+                from PyQt5.QtWidgets import QApplication
+                app = QApplication.instance()
+                if app:
+                    app.alert(self, 3000)
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(minutes * 60 * 1000, fire)
+
+            return f"✅ {result.get('message', '')}"
+
+        # 天气:包含城市名/天气关键词
         m = re.search(r'([\u4e00-\u9fa5]{2,4})(?:的)?(?:天气|气温|温度|冷不冷|热不热|下雨|下雪|刮风)', text)
         if m:
             city = m.group(1)
             # 排除非城市名
             if city not in ('今天', '明天', '后天', '昨天', '什么', '怎么'):
                 result = _weather(city)
-                return f"{result.get('city','')}天气：{result.get('weather','')}，{result.get('temp','')}，{result.get('wind','')}"
+                return f"{result.get('city','')}天气:{result.get('weather','')},{result.get('temp','')},{result.get('wind','')}"
         if '天气' in text:
             result = _weather('北京')
-            return f"{result.get('city','')}天气：{result.get('weather','')}，{result.get('temp','')}，{result.get('wind','')}"
+            return f"{result.get('city','')}天气:{result.get('weather','')},{result.get('temp','')},{result.get('wind','')}"
 
         if any(k in text for k in ['电脑状态', '系统状态', 'cpu', 'CPU', '内存', '性能']):
             result = _sysinfo()
             if isinstance(result, dict) and 'error' not in result:
-                return f"系统：{result.get('system','')}\nCPU：{result.get('cpu','')}\n内存：{result.get('memory','')}"
+                return f"系统:{result.get('system','')}\nCPU:{result.get('cpu','')}\n内存:{result.get('memory','')}"
 
         if any(k in text for k in ['我的IP', 'IP在哪', 'ip地址', '外网']):
             result = _myip()
             if isinstance(result, dict) and 'error' not in result:
-                return f"IP：{result.get('ip','')}\n归属地：{result.get('country','')} {result.get('region','')} {result.get('city','')}\n运营商：{result.get('isp','')}"
+                return f"IP:{result.get('ip','')}\n归属地:{result.get('country','')} {result.get('region','')} {result.get('city','')}\n运营商:{result.get('isp','')}"
 
         if any(k in text for k in ['来句', '语录', '鸡汤', '一言', '名言']):
             return _quote()
@@ -821,13 +996,13 @@ class FoxChatDialog(QDialog):
         if any(k in text for k in ['运势', '占卜', '运气', '抽签', '今天运气']):
             result = _fortune()
             if isinstance(result, dict):
-                return f"今日运势：{result.get('level','')}\n建议：{result.get('advice','')}\n幸运色：{result.get('lucky_color','')}"
+                return f"今日运势:{result.get('level','')}\n建议:{result.get('advice','')}\n幸运色:{result.get('lucky_color','')}"
 
         if any(k in text for k in ['密码', '生成密码', '随机密码']):
             m = re.search(r'(\d+)位', text)
             length = int(m.group(1)) if m else 16
             result = _password(length)
-            return f"生成的密码（{length}位）：{result.get('password','')}"
+            return f"生成的密码({length}位):{result.get('password','')}"
 
         return None
 
@@ -837,10 +1012,18 @@ class FoxChatDialog(QDialog):
         if tool_result:
             # 用 LLM 润色成自然语言
             self.conversation.append({"role": "user", "content": text})
+            # 先把工具结果写进历史，确保后续对话能引用
+            self.conversation.append({"role": "tool", "content": tool_result})
+            
+            # 优化提示词：让 LLM 用对话式语气回复
             brief = [
                 {"role": "system", "content": self.conversation[0]["content"]},
                 {"role": "user", "content": text},
-                {"role": "assistant", "content": f"工具返回：{tool_result}\n\n请用可爱的语气把结果告诉用户"}
+                {"role": "tool", "content": tool_result},
+                {
+                    "role": "assistant",
+                    "content": f"工具返回了以下信息：{tool_result}\n\n请把这些信息用温柔可爱的语气自然地告诉用户，像一个真实的朋友聊天一样。不要机械地罗列数据，要把结果融入对话中，适当加入关心的话语和表情符号。"
+                }
             ]
             def on_response(response):
                 cleaned = response.strip()
@@ -849,17 +1032,19 @@ class FoxChatDialog(QDialog):
                 self.send_btn.setEnabled(True)
                 self.send_btn.setText("发送")
             def on_error(err):
-                self._add_msg("assistant", tool_result)  # 裸数据兜底
+                # 错误时也给一个友好的回复
+                self._add_msg("assistant", f"🦊 {tool_result}\n\n（小狐仙正在努力学习中...）")
                 self.conversation.append({"role": "assistant", "content": tool_result})
                 self.send_btn.setEnabled(True)
                 self.send_btn.setText("发送")
             try:
                 import ollama
-                t = LLMChatThread(brief)
-                t.finished.connect(on_response)
-                t.error.connect(on_error)
-                t.start()
-            except:
+                # 必须保存到 self 防止线程被垃圾回收时还在运行 → 闪退
+                self.llm_thread = LLMChatThread(brief)
+                self.llm_thread.finished.connect(on_response)
+                self.llm_thread.error.connect(on_error)
+                self.llm_thread.start()
+            except Exception:
                 on_error(None)
             return
 
@@ -874,19 +1059,33 @@ class FoxChatDialog(QDialog):
             self.send_btn.setText("发送")
 
         def on_error(err):
-            self._add_msg("assistant", "😅 小狐仙走神了… 试试直接命令我：\n" + 
+            self._add_msg("assistant", "😅 小狐仙走神了... 试试直接命令我:\n" +
                 "• 打开 记事本\n• 创建 test.txt\n• 删除 file.txt")
             self.send_btn.setEnabled(True)
             self.send_btn.setText("发送")
+
+        def on_reminder(text, minutes):
+            """收到提醒工具的信号,创建实际的 QTimer"""
+            def fire():
+                self._add_msg("assistant", f"⏰ 提醒：{text}")
+                from PyQt5.QtWidgets import QApplication
+                app = QApplication.instance()
+                if app:
+                    app.alert(self, 3000)
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(minutes * 60 * 1000, fire)
+            self._add_msg("assistant", f"✅ 已设置 {minutes} 分钟后提醒：{text}")
 
         try:
             import ollama
             from tools import get_ollama_tools
             recent = self.conversation[-10:]
             tools = get_ollama_tools()
-            self.llm_thread = ToolChatThread(recent, tools)
+            # 传入 conversation 引用以便回写工具调用结果
+            self.llm_thread = ToolChatThread(recent, tools, conversation_ref=self.conversation)
             self.llm_thread.finished.connect(on_response)
             self.llm_thread.error.connect(on_error)
+            self.llm_thread.reminder_scheduled.connect(on_reminder)
             self.llm_thread.start()
         except ImportError:
             on_error("ollama 未安装")
@@ -911,19 +1110,29 @@ class FoxChatDialog(QDialog):
     # ---- 阻止回车关闭对话框 ----
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
-            # 输入框的回车由 returnPressed 处理，不传播到 dialog
+            # 输入框的回车由 returnPressed 处理,不传播到 dialog
             if self.input_edit.hasFocus():
                 event.accept()
                 return
         super().keyPressEvent(event)
 
     def closeEvent(self, event):
+        # 停止键盘监听线程
         self._key_thread_running = False
+
+        # 等待已知的 QThread 结束(避免遍历 dir(self) 的性能损耗)
+        _known_threads = ['llm_thread', 'cmd_thread']
+        for name in _known_threads:
+            attr = getattr(self, name, None)
+            if attr is not None and isinstance(attr, QThread) and attr.isRunning():
+                attr.quit()
+                attr.wait(2000)
+
         super().closeEvent(event)
 
 
 # ======================================================================
-# 功能概览（固定文本）
+# 功能概览(固定文本)
 # ======================================================================
 class FeatureOverview(QDialog):
     def __init__(self, parent=None):
@@ -948,7 +1157,7 @@ class FeatureOverview(QDialog):
         outer_layout.setContentsMargins(24, 20, 24, 12)
         outer_layout.setSpacing(10)
 
-        # 顶部：关闭 + 标题
+        # 顶部:关闭 + 标题
         top_frame = QFrame()
         top_frame.setStyleSheet("background: transparent;")
         top = QHBoxLayout(top_frame)
@@ -1003,8 +1212,8 @@ class FeatureOverview(QDialog):
         cl.setSpacing(8)
 
         cards = [
-            ("💬 AI 聊天", "和仙狐自由对话，她会智能回复你"),
-            ("🗣️ 语音输入", "点击 🎤 切换语音模式，长按 T 键说话"),
+            ("💬 AI 聊天", "和仙狐自由对话,她会智能回复你"),
+            ("🗣️ 语音输入", "点击 🎤 切换语音模式,长按 T 键说话"),
             ("🌤 天气查询", "说「北京天气」仙狐马上告诉你"),
             ("📊 系统状态", "说「电脑状态」查看 CPU、内存占用"),
             ("📍 IP 查询", "说「我的IP」查看外网地址和归属地"),
@@ -1014,7 +1223,7 @@ class FeatureOverview(QDialog):
             ("📁 打开程序", "说「打开 记事本」「打开 计算器」"),
             ("📄 文件管理", "自然语言创建、删除、移动文件"),
             ("🎨 仙狐陪伴", "Live2D 仙狐陪在你桌面上~"),
-            ("🔄 拖拽 & 缩放", "左键拖拽窗口，右下角缩放"),
+            ("🔄 拖拽 & 缩放", "左键拖拽窗口,右下角缩放"),
         ]
 
         for icon_title, desc in cards:
@@ -1135,7 +1344,7 @@ def main():
     except KeyboardInterrupt:
         print("\n桌宠退出")
     except Exception as e:
-        print(f"\n错误：{e}")
+        print(f"\n错误:{e}")
         import traceback
         traceback.print_exc()
         input("\n按回车键退出...")

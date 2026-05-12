@@ -25,34 +25,87 @@ JSON 格式：
 {
     "action": "open|create|delete|move|view|unknown",
     "target": "操作对象（文件名或程序名）",
+    "target_type": "file|folder|program|unknown",
     "destination": "目标路径（仅 move 操作需要）",
+    "directory": "操作所在目录（如"这个文件夹"指最近打开的文件夹）",
     "message": "返回给用户的友好提示"
 }
 
+类型说明：
+- file: 文件（如 test.txt, 图片.png）
+- folder: 文件夹/目录（如 丑橘, 文档）
+- program: 应用程序（如 记事本, 计算器）
+- unknown: 无法确定类型
+
 示例：
-用户说"打开记事本" → {"action": "open", "target": "记事本", "destination": null, "message": "正在打开记事本..."}
-用户说"创建 test.txt" → {"action": "create", "target": "test.txt", "destination": null, "message": "已创建 test.txt"}
-用户说"删除 file.txt" → {"action": "delete", "target": "file.txt", "destination": null, "message": "已删除 file.txt"}
-用户说"移动 a.txt 到 D:/backup" → {"action": "move", "target": "a.txt", "destination": "D:/backup", "message": "已移动文件"}
-用户说"查看图片.png" → {"action": "view", "target": "图片.png", "destination": null, "message": "正在查看..."}
+用户说"打开记事本" → {"action": "open", "target": "记事本", "target_type": "program", "destination": null, "directory": null, "message": "正在打开记事本..."}
+用户说"打开丑橘文件夹" → {"action": "open", "target": "丑橘", "target_type": "folder", "destination": null, "directory": null, "message": "正在打开丑橘文件夹..."}
+用户说"打开丑橘" → {"action": "open", "target": "丑橘", "target_type": "folder", "destination": null, "directory": null, "message": "正在打开丑橘文件夹..."}
+用户说"创建 test.txt" → {"action": "create", "target": "test.txt", "target_type": "file", "destination": null, "directory": null, "message": "已创建 test.txt"}
+用户说"删除 file.txt" → {"action": "delete", "target": "file.txt", "target_type": "file", "destination": null, "directory": null, "message": "已删除 file.txt"}
+用户说"删除这个文件夹里面的大愁居文件" → {"action": "delete", "target": "大愁居", "target_type": "file", "destination": null, "directory": "这个文件夹", "message": "已删除大愁居文件"}
+用户说"删除这个文件夹里面的大愁居" → {"action": "delete", "target": "大愁居", "target_type": "file", "destination": null, "directory": "这个文件夹", "message": "已删除大愁居"}
+用户说"移动 a.txt 到 D:/backup" → {"action": "move", "target": "a.txt", "target_type": "file", "destination": "D:/backup", "directory": null, "message": "已移动文件"}
+用户说"查看图片.png" → {"action": "view", "target": "图片.png", "target_type": "file", "destination": null, "directory": null, "message": "正在查看..."}
 
 支持的程序名：记事本、计算器、Chrome、Edge、微信、QQ、游戏等
 支持的文件操作：.txt, .doc, .docx, .pdf, .jpg, .png, .mp4, .mp3 等
 
-如果无法理解，返回：{"action": "unknown", "target": null, "destination": null, "message": "我不太明白，请试试：打开、创建、删除、移动、查看"}"""
+注意：
+1. 如果用户说"这个文件夹"、"当前文件夹"、"刚才打开的文件夹"，请在 directory 字段中保留原文
+2. 如果目标名称包含"文件夹"、"目录"字样，target_type 应为 folder
+3. 如果目标名称包含文件扩展名（如 .txt, .png），target_type 应为 file
+4. 如果目标是常见程序名，target_type 应为 program
+
+如果无法理解，返回：{"action": "unknown", "target": null, "target_type": "unknown", "destination": null, "directory": null, "message": "我不太明白，请试试：打开、创建、删除、移动、查看"}"""
     
     def _init_ollama(self):
         """初始化 Ollama"""
         try:
             import ollama
             self.ollama = ollama
-            print("✅ Ollama 连接成功")
+            print("[INFO] Ollama 连接成功")
         except ImportError:
-            print("❌ ollama 库未安装，请运行：pip install ollama")
+            print("[ERROR] ollama 库未安装，请运行：pip install ollama")
             self.ollama = None
         except Exception as e:
-            print(f"❌ Ollama 初始化失败：{e}")
+            print(f"[ERROR] Ollama 初始化失败：{e}")
             self.ollama = None
+    
+    def _resolve_drive_path(self, dest):
+        """将中文驱动器名称和常见位置转换为实际路径"""
+        import os
+        
+        # 驱动器映射
+        drive_map = {
+            'c盘': 'C:\\', 'c': 'C:\\', 'c:': 'C:\\',
+            'd盘': 'D:\\', 'd': 'D:\\', 'd:': 'D:\\',
+            'e盘': 'E:\\', 'e': 'E:\\', 'e:': 'E:\\',
+            'f盘': 'F:\\', 'f': 'F:\\', 'f:': 'F:\\',
+            'g盘': 'G:\\', 'g': 'G:\\', 'g:': 'G:\\',
+            'h盘': 'H:\\', 'h': 'H:\\', 'h:': 'H:\\',
+        }
+        
+        # 常见位置映射
+        common_locations = {
+            '桌面': os.path.join(os.path.expanduser('~'), 'Desktop'),
+            '文档': os.path.join(os.path.expanduser('~'), 'Documents'),
+            '下载': os.path.join(os.path.expanduser('~'), 'Downloads'),
+            '桌宠': os.path.dirname(os.path.abspath(__file__)),
+            '桌宠文件夹': os.path.dirname(os.path.abspath(__file__)),
+            '程序目录': os.path.dirname(os.path.abspath(__file__)),
+            '当前目录': os.getcwd(),
+        }
+        
+        # 先检查驱动器映射
+        if dest.lower() in drive_map:
+            return drive_map[dest.lower()]
+        
+        # 检查常见位置
+        if dest in common_locations:
+            return common_locations[dest]
+        
+        return dest
     
     def parse_command(self, text: str) -> dict:
         """解析用户命令"""
@@ -98,11 +151,21 @@ JSON 格式：
                         pass
             
             if parsed and 'action' in parsed:
+                # 解析驱动器路径
+                dest = parsed.get('destination')
+                if dest:
+                    dest = self._resolve_drive_path(dest)
+                
+                # 特殊修正：LLM可能把"桌宠"误识别为"桌面"
+                if dest and "Desktop" in dest and "桌宠" in text:
+                    dest = self._resolve_drive_path("桌宠")
+                
                 result = {
                     "success": parsed['action'] != 'unknown',
                     "action": parsed['action'],
                     "target": parsed.get('target'),
-                    "destination": parsed.get('destination'),
+                    "target_type": parsed.get('target_type'),
+                    "destination": dest,
                     "directory": parsed.get('directory'),
                     "content": parsed.get('content'),
                     "message": parsed.get('message', '')
@@ -121,10 +184,46 @@ JSON 格式：
         """回退到规则匹配（支持复杂中文指令）"""
         import re
 
-        # ---- 模式1：在「目录」里面「动作」「目标」 ----
+        # 常见程序列表
+        common_programs = {'记事本', '计算器', '画图', 'cmd', '命令提示符', 'powershell',
+                          '控制面板', '任务管理器', '资源管理器', '注册表', '截图',
+                          '截图工具', '写字板', '放大镜', '屏幕键盘', '语音输入',
+                          '便签', '录音机', '微信', 'qq', 'chrome', 'edge', 'steam',
+                          'code', 'vscode', 'vs code', 'visual studio code', 'word',
+                          'excel', 'ppt', 'powerpoint', 'outlook', 'onenote', 'python'}
+
+        def _detect_target_type(target):
+            """根据目标名称判断类型"""
+            target_lower = target.lower()
+            
+            # 检查是否为程序
+            for prog in common_programs:
+                if prog in target_lower or target_lower in prog:
+                    return 'program'
+            
+            # 检查是否为文件夹（包含文件夹/目录字样）
+            if any(word in target for word in ['文件夹', '目录', '文件夹里', '目录里']):
+                return 'folder'
+            
+            # 检查是否为文件（包含扩展名）
+            if '.' in target and len(target.split('.')[-1]) <= 4:
+                return 'file'
+            
+            # 默认返回unknown
+            return 'unknown'
+
+        def _extract_context_dir(text):
+            """提取上下文目录引用（如"这个文件夹"）"""
+            context_phrases = ['这个文件夹', '当前文件夹', '刚才打开的文件夹', '刚才的文件夹']
+            for phrase in context_phrases:
+                if phrase in text:
+                    return phrase
+            return None
+
+        # ---- 模式1：在「目录」里面「动作」「目标」----
         m = re.search(r'在\s*([\u4e00-\u9fa5\w\\/]+?)\s*(?:里|里面|目录|文件夹)?\s*'
                       r'(打开|创建|新建|删除|删掉|查看|看看|移动)\s*'
-                      r'(?:命名为?|一个)?\s*([\u4e00-\u9fa5\w.\\/]+?)?(?:的)?'
+                      r'(?:命名为?|一个)?\s*[：:]?\s*([\u4e00-\u9fa5\w.\\/：:（）()，,]+?)?(?:的)?'
                       r'(?:文件|文件夹)?\s*$', text)
         if m:
             directory = m.group(1).strip()
@@ -134,67 +233,174 @@ JSON 格式：
                          '删除': 'delete', '删掉': 'delete',
                          '查看': 'view', '看看': 'view', '移动': 'move'}
             action_en = action_map.get(action_cn, 'open')
+            
+            # 检查上下文引用
+            context_dir = _extract_context_dir(text)
+            
             if action_en == 'open':
+                target_type = _detect_target_type(directory)
                 return {"success": True, "action": "open", "target": directory,
-                        "directory": None, "destination": None, "content": None,
+                        "target_type": target_type, "directory": None, 
+                        "destination": None, "content": None,
                         "message": f"正在打开{directory}..."}
             if action_en == 'create' and target:
+                target_type = _detect_target_type(target)
                 return {"success": True, "action": "create", "target": target,
-                        "directory": directory, "destination": None, "content": None,
+                        "target_type": target_type, "directory": directory, 
+                        "destination": None, "content": None,
                         "message": f"在{directory}中创建{target}"}
             if action_en == 'create' and not target:
+                target_type = _detect_target_type(directory)
                 return {"success": True, "action": "create", "target": directory,
-                        "directory": None, "destination": None, "content": None,
+                        "target_type": target_type, "directory": None, 
+                        "destination": None, "content": None,
                         "message": f"正在创建{directory}..."}
 
-        # ---- 模式2：打开 ----
+        # ---- 模式2：删除/移动 + 上下文引用（如"删除这个文件夹里面的大愁居文件"）----
+        m = re.search(r'(删除|删掉|移动)\s*(这个文件夹|当前文件夹|刚才打开的文件夹|刚才的文件夹)\s*(?:里面|里)?\s*(?:的)?\s*([\u4e00-\u9fa5\w.]+?)\s*(文件|文件夹)?\s*$', text)
+        if m:
+            action_cn = m.group(1)
+            context_dir = m.group(2)
+            target = m.group(3).strip()
+            type_hint = m.group(4) if m.group(4) else ''
+            
+            action_map = {'删除': 'delete', '删掉': 'delete', '移动': 'move'}
+            action_en = action_map.get(action_cn, 'delete')
+            
+            # 根据type_hint和文件名判断类型
+            if type_hint == '文件' or '.' in target:
+                target_type = 'file'
+            elif type_hint == '文件夹':
+                target_type = 'folder'
+            else:
+                target_type = 'file'  # 默认按文件处理
+            
+            if action_en == 'delete':
+                return {"success": True, "action": "delete", "target": target,
+                        "target_type": target_type, "directory": context_dir,
+                        "destination": None, "content": None,
+                        "message": f"已删除{target}"}
+            elif action_en == 'move':
+                return {"success": True, "action": "move", "target": target,
+                        "target_type": target_type, "directory": context_dir,
+                        "destination": None, "content": None,
+                        "message": f"准备移动{target}"}
+        
+        # ---- 模式2b：删除/移动 + 简单"里面的"引用（如"删除里面的大愁居文件"）----
+        m = re.search(r'(删除|删掉|移动)\s*(?:里面|里)?\s*(?:的)?\s*([\u4e00-\u9fa5\w.]+?)\s*(文件|文件夹)?\s*$', text)
+        if m:
+            action_cn = m.group(1)
+            target = m.group(2).strip()
+            type_hint = m.group(3) if m.group(3) else ''
+            
+            action_map = {'删除': 'delete', '删掉': 'delete', '移动': 'move'}
+            action_en = action_map.get(action_cn, 'delete')
+            
+            # 判断类型
+            if type_hint == '文件' or '.' in target:
+                target_type = 'file'
+            elif type_hint == '文件夹':
+                target_type = 'folder'
+            else:
+                target_type = 'file'
+            
+            # 使用上下文（最近打开的文件夹）
+            return {"success": True, "action": action_en, "target": target,
+                    "target_type": target_type, "directory": "这个文件夹",
+                    "destination": None, "content": None,
+                    "message": f"已{action_cn}{target}"}
+
+        # ---- 模式3：打开 ----
         for kw in ["打开", "进入", "启动", "运行"]:
             if kw in text:
                 target = text.replace(kw, "").strip()
+                # 去掉"文件夹"后缀
+                if target.endswith('文件夹'):
+                    target = target[:-3]
+                    target_type = 'folder'
+                elif target.endswith('目录'):
+                    target = target[:-2]
+                    target_type = 'folder'
+                else:
+                    target_type = _detect_target_type(target)
+                
                 if target:
                     return {"success": True, "action": "open", "target": target,
-                            "directory": None, "destination": None, "content": None,
+                            "target_type": target_type, "directory": None, 
+                            "destination": None, "content": None,
                             "message": f"正在打开{target}..."}
 
-        # ---- 模式3：创建/新建 ----
+        # ---- 模式4：创建/新建 ----
         for kw in ["创建", "新建"]:
             if kw in text:
                 target = text.replace(kw, "").strip()
                 target = re.sub(r'^(?:命名为?|一个)\s*', '', target)
+                target_type = _detect_target_type(target)
                 if target:
                     return {"success": True, "action": "create", "target": target,
-                            "directory": None, "destination": None, "content": None,
+                            "target_type": target_type, "directory": None, 
+                            "destination": None, "content": None,
                             "message": f"已创建{target}"}
 
-        # ---- 模式4：删除 ----
+        # ---- 模式5：删除 ----
         for kw in ["删除", "删掉"]:
             if kw in text:
                 target = text.replace(kw, "").strip()
+                # 检查是否有上下文引用
+                context_dir = _extract_context_dir(text)
+                
+                # 判断目标类型
+                if target.endswith('文件夹'):
+                    target = target[:-3]
+                    target_type = 'folder'
+                elif target.endswith('目录'):
+                    target = target[:-2]
+                    target_type = 'folder'
+                elif target.endswith('文件'):
+                    target = target[:-2]
+                    target_type = 'file'
+                else:
+                    target_type = 'file'  # 默认按文件处理
+                
                 if target:
                     return {"success": True, "action": "delete", "target": target,
-                            "directory": None, "destination": None, "content": None,
+                            "target_type": target_type, "directory": context_dir,
+                            "destination": None, "content": None,
                             "message": f"已删除{target}"}
 
-        # ---- 模式5：移动 ----
+        # ---- 模式6：移动 ----
         if "移动" in text and "到" in text:
             parts = text.split("移动", 1)[1].split("到", 1)
             if len(parts) == 2:
+                target = parts[0].strip()
+                dest = parts[1].strip()
+                # 去掉"文件夹"后缀
+                if target.endswith('文件夹'):
+                    target = target[:-3]
+                # 解析驱动器路径（使用类方法）
+                dest = self._resolve_drive_path(dest)
+                # 特殊处理：LLM可能把"桌宠"识别为"桌面"
+                if "桌面" in parts[1] and "桌宠" in text:
+                    dest = self._resolve_drive_path("桌宠")
+                target_type = self._detect_target_type(target)
                 return {"success": True, "action": "move",
-                        "target": parts[0].strip(), "destination": parts[1].strip(),
-                        "directory": None, "content": None,
+                        "target": target, "target_type": target_type,
+                        "destination": dest, "directory": None, "content": None,
                         "message": "已移动文件"}
 
-        # ---- 模式6：查看 ----
+        # ---- 模式7：查看 ----
         for kw in ["查看", "看看"]:
             if kw in text:
                 target = text.replace(kw, "").strip()
+                target_type = _detect_target_type(target)
                 if target:
                     return {"success": True, "action": "view", "target": target,
-                            "directory": None, "destination": None, "content": None,
+                            "target_type": target_type, "directory": None, 
+                            "destination": None, "content": None,
                             "message": f"正在查看{target}..."}
 
         return {"success": False, "action": "unknown",
-                "target": None, "directory": None,
+                "target": None, "target_type": "unknown", "directory": None,
                 "destination": None, "content": None,
                 "message": "我不太明白，请试试：打开、创建、删除、移动、查看"}
 
