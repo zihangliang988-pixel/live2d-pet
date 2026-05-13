@@ -2,6 +2,12 @@
 # -*- coding: utf-8 -*-
 """
 语音处理模块 - 语音转文字和文字转语音
+
+常见安装问题：
+  pip install pyaudio 失败？试试：
+    pip install pipwin
+    pipwin install pyaudio
+  或直接安装：https://www.lfd.uci.edu/~gohlke/pythonlibs/#pyaudio
 """
 
 import speech_recognition as sr
@@ -10,82 +16,100 @@ import sys
 from typing import Optional
 
 
+# 运行状态：记录麦克风不可用的原因，供 UI 层提示
+MICROPHONE_ERROR = None
+
+
 class VoiceProcessor:
     def __init__(self, language: str = "zh-CN"):
+        global MICROPHONE_ERROR
         self.language = language
         self.recognizer = sr.Recognizer()
         self.microphone = None
+        self._microphone_error = None
         self._init_microphone()
-    
+
     def _init_microphone(self):
-        """初始化麦克风"""
+        """初始化麦克风，失败时记录详细原因"""
+        global MICROPHONE_ERROR
         try:
             self.microphone = sr.Microphone()
-            # 调整灵敏度
             with self.microphone as source:
-                self.recognizer.adjust_for_ambient_noise(source, duration=1)
-            print("✅ 麦克风已就绪")
+                self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
+            MICROPHONE_ERROR = None
+            self._microphone_error = None
+        except OSError as e:
+            msg = "找不到麦克风设备，请检查麦克风是否已连接"
+            MICROPHONE_ERROR = msg
+            self._microphone_error = msg
+            print(f"[Voice] {msg}")
+        except AttributeError as e:
+            msg = ("语音识别库不完整，可能缺少 pyaudio。\n"
+                   "安装方式：pip install pyaudio\n"
+                   "安装失败可尝试：pip install pipwin && pipwin install pyaudio")
+            MICROPHONE_ERROR = msg
+            self._microphone_error = msg
+            print(f"[Voice] {msg}")
         except Exception as e:
-            print(f"⚠️ 麦克风初始化失败：{e}")
-            print("💡 提示：如果 pyaudio 安装失败，可以跳过语音识别功能")
-            print("   桌宠仍可使用文字输入和 LLM 命令理解")
-            self.microphone = None
-    
+            msg = f"麦克风初始化失败：{str(e)[:80]}"
+            MICROPHONE_ERROR = msg
+            self._microphone_error = msg
+            print(f"[Voice] {msg}")
+
+    def is_available(self) -> tuple:
+        """检查语音功能是否可用，返回 (ok: bool, reason: str|None)"""
+        if not self.microphone:
+            return (False, self._microphone_error or "麦克风不可用")
+        return (True, None)
+
     def listen(self, timeout: int = 5) -> Optional[str]:
         """
         监听语音输入并转换为文字
-        
+
         Args:
             timeout: 超时时间（秒）
-        
+
         Returns:
             识别的文字，失败返回 None
         """
-        if not self.microphone:
-            print("⚠️ 麦克风未就绪")
+        ok, err = self.is_available()
+        if not ok:
+            print(f"[Voice] {err}")
             return None
-        
+
         try:
-            print("🎤 正在监听...（说'打开'、'创建'、'删除'等命令）")
-            
             with self.microphone as source:
-                # 监听语音
-                audio = self.recognizer.listen(source, timeout=timeout, phrase_time_limit=10)
-            
-            print("🔄 正在识别...")
-            
-            # 尝试使用 Google 语音识别（需要网络）
+                self.recognizer.adjust_for_ambient_noise(source, duration=0.3)
+                audio = self.recognizer.listen(
+                    source, timeout=timeout, phrase_time_limit=10
+                )
+
+            # 优先 Google（需要网络，中文识别好）
             try:
                 text = self.recognizer.recognize_google(audio, language=self.language)
-                print(f"✅ 识别成功：{text}")
                 return text
             except sr.UnknownValueError:
-                print("❌ 无法识别语音")
                 return None
-            except sr.RequestError as e:
-                print(f"❌ Google API 错误：{e}")
+            except sr.RequestError:
+                # Google 不可用时尝试百度
+                # （百度需要 API key，跳过）
                 return None
-        
+
         except sr.WaitTimeoutError:
-            print("⏱️ 超时，未检测到语音")
-            return None
-        except sr.UnknownValueError:
-            print("❌ 无法识别语音内容")
             return None
         except Exception as e:
-            print(f"❌ 语音识别错误：{e}")
+            print(f"[Voice] 识别异常：{e}")
             return None
-    
+
     def speak(self, text: str, rate: int = 150):
         """
         文字转语音（使用系统 TTS）
-        
+
         Args:
             text: 要朗读的文字
             rate: 语速（100-300）
         """
         try:
-            # Windows 系统 TTS（推荐）
             if sys.platform == 'win32':
                 try:
                     import win32com.client
@@ -93,34 +117,42 @@ class VoiceProcessor:
                     speaker.Speak(text)
                     return
                 except ImportError:
-                    # 如果 win32com 不可用，使用 pyttsx3
                     pass
-            
-            # 使用 pyttsx3（跨平台，离线可用）
+
             import pyttsx3
             engine = pyttsx3.init()
             engine.setProperty('rate', rate)
             engine.say(text)
             engine.runAndWait()
-            
+
         except Exception as e:
-            print(f"❌ 语音播放失败：{e}")
-            print(f"🔊 {text}")
-    
+            print(f"[Voice] TTS 失败：{e}")
+
     def test_microphone(self) -> bool:
         """测试麦克风是否正常"""
-        if not self.microphone:
+        ok, err = self.is_available()
+        if not ok:
             return False
-        
         try:
-            print("🎤 请说话测试麦克风...")
             text = self.listen(timeout=3)
-            if text:
-                print(f"✅ 识别成功：{text}")
-                return True
-            else:
-                print("❌ 未检测到语音")
-                return False
-        except Exception as e:
-            print(f"❌ 测试失败：{e}")
+            return text is not None
+        except Exception:
             return False
+
+
+# 便捷函数：供 UI 层调用，获取语音不可用的友好提示
+def get_microphone_help_text() -> Optional[str]:
+    """返回麦克风问题的用户友好提示（用于弹窗展示）"""
+    if MICROPHONE_ERROR:
+        return (
+            "🎤 语音功能暂不可用\n\n"
+            f"原因：{MICROPHONE_ERROR}\n\n"
+            "💡 你可以：\n"
+            "1. 继续使用文字输入聊天\n"
+            "2. 安装 pyaudio 后重试：\n"
+            "   pip install pyaudio\n"
+            "3. 如果安装失败，试试：\n"
+            "   pip install pipwin\n"
+            "   pipwin install pyaudio"
+        )
+    return None

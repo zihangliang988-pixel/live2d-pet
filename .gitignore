@@ -9,10 +9,12 @@ build/
 # QtWebEngine cache
 *_Cache/
 *_cache/
+cache/
 
 # Logs
 error.log
 test_stderr.log
+*.log
 
 # IDE
 .vscode/
@@ -28,3 +30,7 @@ _debug*.py
 _server*.py
 _verify*.py
 _*.py
+test_*.py
+
+# Backup files
+*.bak

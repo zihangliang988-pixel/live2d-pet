@@ -29,7 +29,7 @@ from PyQt5.QtWebEngineWidgets import QWebEngineView
 from file_manager import FileManager
 
 # ======================================================================
-# 配色 · 暖阳橙(仙狐主题)
+# 配色 · 暖阳橙 (仙狐主题) - 保持主题色不变
 # ======================================================================
 FOX_ORANGE = "#FF8C42"
 FOX_PEACH = "#FFB07C"
@@ -48,6 +48,12 @@ FOX_INPUT_BG = "rgba(255,248,240,0.9)"
 FOX_BTN = "#FF8C42"
 FOX_BTN_HOVER = "#FF7A2E"
 FOX_BORDER = "#E8C4A0"
+
+# 新增：高端化样式常量
+FOX_SHADOW = "0 2px 8px rgba(0,0,0,0.08)"  # 气泡阴影
+FOX_SHADOW_LIGHT = "0 1px 3px rgba(0,0,0,0.05)"  # 输入框内阴影
+FOX_GLOW = "0 0 8px rgba(255,140,66,0.3)"  # 聚焦外发光
+FOX_AVATAR_BORDER = "2px solid #E8C4A0"  # 头像边框
 
 # ======================================================================
 # LLM 对话线程
@@ -185,6 +191,14 @@ class FoxPet(QWidget):
         self.setCursor(Qt.PointingHandCursor)
         self.setMinimumSize(150, 200)
         self.resize(240, 360)
+        
+        # 添加窗口阴影（通过 CSS 模拟）
+        self.setStyleSheet(f"""
+            QWidget {{
+                border: 1px solid rgba(255,140,66,0.1);
+                border-radius: 16px;
+            }}
+        """)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -204,19 +218,49 @@ class FoxPet(QWidget):
 
         layout.addWidget(self.webview, stretch=1)
 
-        # 名称标签(仙狐风格)
-        name_label = QLabel("🦊 仙狐")
-        name_label.setAlignment(Qt.AlignCenter)
-        name_label.setFont(QFont("Microsoft YaHei UI", 11, QFont.Bold))
-        name_label.setStyleSheet(f"""
-            background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-                stop:0 rgba(255,140,66,200), stop:1 rgba(255,160,124,200));
-            border-radius: 12px;
-            padding: 3px 16px;
-            color: white;
-            margin: 0 50px;
+        # ---- 玻璃态底座（高端化） ----
+        glass_base = QFrame()
+        glass_base.setFixedHeight(45)
+        glass_base.setStyleSheet(f"""
+            QFrame {{
+                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 rgba(255,248,240,0.85), 
+                    stop:1 rgba(255,200,150,0.75));
+                border-top: 1px solid rgba(232,196,160,0.4);
+                border-radius: 0px 0px 16px 16px;
+                backdrop-filter: blur(10px);
+            }}
         """)
-        layout.addWidget(name_label)
+        base_layout = QHBoxLayout(glass_base)
+        base_layout.setContentsMargins(16, 10, 16, 10)
+        
+        # 宠物名称（精致字体）
+        name_label = QLabel("🦊 仙狐")
+        name_label.setFont(QFont("Segoe UI Semibold", 13, QFont.Bold))
+        name_label.setStyleSheet(f"color: {FOX_TEXT}; background: transparent;")
+        base_layout.addWidget(name_label)
+        
+        base_layout.addStretch()
+        
+        # 状态指示器（小圆点）
+        status_dot = QLabel()
+        status_dot.setFixedSize(8, 8)
+        status_dot.setStyleSheet("""
+            background: qradialgradient(cx:0.5,cy:0.5,r:1,
+                fx:0.5,fy:0.5,
+                stop:0 #4ade80, stop:1 #22c55e);
+            border-radius: 4px;
+            box-shadow: 0 0 4px rgba(74,222,128,0.6);
+        """)
+        base_layout.addWidget(status_dot)
+        
+        # 状态文字
+        status_label = QLabel("在线")
+        status_label.setFont(QFont("Segoe UI", 10))
+        status_label.setStyleSheet(f"color: {FOX_SUBTEXT}; background: transparent;")
+        base_layout.addWidget(status_label)
+        
+        layout.addWidget(glass_base)
 
         # 缩放手柄
         self.grip = QSizeGrip(self)
@@ -283,31 +327,37 @@ class FoxPet(QWidget):
             self._last_click_time = time_module.time()
             event.accept()
 
-    # ---- 右键菜单(3项) ----
+    # ---- 右键菜单（高端化） ----
     def _show_context_menu(self, pos):
         menu = QMenu(self)
         menu.setStyleSheet(f"""
             QMenu {{
-                background-color: rgba(255,248,240,245);
+                background-color: rgba(255,248,240,0.98);
                 border: 1px solid {FOX_BORDER};
-                border-radius: 10px;
-                padding: 6px 4px;
+                border-radius: 12px;
+                padding: 8px 6px;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.1), inset 0 1px 3px rgba(255,255,255,0.5);
             }}
             QMenu::item {{
                 background: transparent;
-                padding: 10px 24px;
-                border-radius: 6px;
+                padding: 12px 28px;
+                border-radius: 8px;
                 color: {FOX_TEXT};
                 font-size: 13px;
+                font-family: 'Segoe UI', 'Microsoft YaHei UI', sans-serif;
+                margin: 2px 6px;
+                transition: all 0.15s ease;
             }}
             QMenu::item:selected {{
-                background: rgba(255,140,66,0.15);
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                    stop:0 rgba(255,140,66,0.2), stop:1 rgba(255,176,124,0.2));
                 color: {FOX_ORANGE};
             }}
             QMenu::separator {{
                 height: 1px;
-                background: {FOX_BORDER};
-                margin: 4px 16px;
+                background: linear-gradient(to right, 
+                    transparent, {FOX_BORDER}, transparent);
+                margin: 6px 16px;
             }}
         """)
 
@@ -528,19 +578,27 @@ class FoxChatDialog(QDialog):
                 border: none;
                 border-radius: 12px;
                 color: {FOX_TEXT};
-                padding: 10px;
+                padding: 16px;  /* 内边距放大 */
             }}
             QScrollBar:vertical {{
-                background: transparent;
-                width: 6px;
+                background: rgba(0,0,0,0.03);  /* 半透明背景 */
+                width: 8px;  /* 滚动条宽度 */
+                border-radius: 4px;
             }}
             QScrollBar::handle:vertical {{
-                background: rgba(255,140,66,0.3);
-                border-radius: 3px;
+                background: rgba(255,140,66,0.4);  /* 半透明橙色 */
+                border-radius: 4px;
                 min-height: 30px;
+                margin: 2px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: rgba(255,140,66,0.6);  /* 悬停时加深 */
             }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
                 height: 0;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: none;
             }}
         """)
         self._add_msg("assistant",
@@ -548,29 +606,29 @@ class FoxChatDialog(QDialog):
             "• 打开 记事本\n• 打开 计算器\n• 创建 test.txt\n• 随便聊聊天~")
         layout.addWidget(self.chat_edit, stretch=1)
 
-        # ---- 输入区域 ----
+        # ---- 输入区域（高端化） ----
         input_frame = QFrame()
         input_frame.setStyleSheet(f"""
             QFrame {{
                 background: {FOX_INPUT_BG};
-                border-radius: 14px;
+                border-radius: 16px;
                 border: 1px solid {FOX_BORDER};
             }}
         """)
         input_layout = QHBoxLayout(input_frame)
-        input_layout.setContentsMargins(6, 6, 6, 6)
-        input_layout.setSpacing(6)
+        input_layout.setContentsMargins(10, 10, 10, 10)  # 放大内边距
+        input_layout.setSpacing(12)  # 增加间距
 
-        # 语音切换按钮(在输入框左边)
+        # 语音切换按钮 (在输入框左边)
         self.mode_btn = QPushButton("🎤")
-        self.mode_btn.setFixedSize(38, 38)
+        self.mode_btn.setFixedSize(42, 42)
         self.mode_btn.setCursor(Qt.PointingHandCursor)
         self.mode_btn.setToolTip("切换语音/文字输入")
         self._update_mode_btn_style()
         self.mode_btn.clicked.connect(self._toggle_voice_mode)
         input_layout.addWidget(self.mode_btn)
 
-        # 语音提示标签(仅语音模式显示)
+        # 语音提示标签 (仅语音模式显示)
         self.voice_hint = QLabel("长按 T 说话")
         self.voice_hint.setFont(QFont("Microsoft YaHei UI", 10))
         self.voice_hint.setStyleSheet(f"color: {FOX_ORANGE}; font-weight: bold; background: transparent;")
@@ -579,30 +637,37 @@ class FoxChatDialog(QDialog):
         self.voice_hint.setVisible(False)
         input_layout.addWidget(self.voice_hint)
 
-        # 文字输入框
+        # 文字输入框（高端化）
         self.input_edit = QLineEdit()
         self.input_edit.setPlaceholderText("输入消息...")
-        self.input_edit.setFont(QFont("Microsoft YaHei UI", 12))
+        self.input_edit.setFont(QFont("Segoe UI", 13))
         self.input_edit.setStyleSheet(f"""
             QLineEdit {{
-                background: rgba(255,255,255,0.6);
+                background: rgba(255,255,255,0.8);
                 border: 1px solid {FOX_BORDER};
-                border-radius: 10px;
-                padding: 10px 14px;
+                border-radius: 12px;
+                padding: 12px 18px;  /* 上下内边距放大 */
                 color: {FOX_TEXT};
                 font-size: 13px;
+                box-shadow: inset {FOX_SHADOW_LIGHT};  /* 内阴影 */
+                transition: all 0.2s ease;
             }}
             QLineEdit:focus {{
-                border: 1px solid {FOX_ORANGE};
+                border: 2px solid {FOX_ORANGE};
+                box-shadow: inset {FOX_SHADOW_LIGHT}, {FOX_GLOW};  /* 聚焦外发光 */
+                padding: 11px 17px;  /* 补偿边框宽度 */
+            }}
+            QLineEdit::placeholder {{
+                color: rgba(139,107,74,0.5);  /* 占位文字更淡 */
             }}
         """)
         self.input_edit.returnPressed.connect(self._send_message)
         input_layout.addWidget(self.input_edit, stretch=1)
 
-        # 发送按钮
-        self.send_btn = QPushButton("发送")
-        self.send_btn.setFixedHeight(38)
-        self.send_btn.setMinimumWidth(60)
+        # 发送按钮（高端化：图标 + 文字 + 动画）
+        self.send_btn = QPushButton("🚀 发送")
+        self.send_btn.setFixedHeight(42)
+        self.send_btn.setMinimumWidth(70)
         self.send_btn.setCursor(Qt.PointingHandCursor)
         self.send_btn.setStyleSheet(f"""
             QPushButton {{
@@ -610,18 +675,28 @@ class FoxChatDialog(QDialog):
                     stop:0 {FOX_ORANGE}, stop:1 {FOX_PEACH});
                 color: white;
                 border: none;
-                border-radius: 10px;
-                padding: 6px 20px;
+                border-radius: 12px;
+                padding: 8px 24px;
                 font-weight: bold;
                 font-size: 13px;
+                font-family: 'Segoe UI Semibold', 'Microsoft YaHei UI', sans-serif;
+                box-shadow: {FOX_SHADOW_LIGHT};
+                transition: all 0.15s ease;
             }}
             QPushButton:hover {{
                 background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
                     stop:0 {FOX_BTN_HOVER}, stop:1 {FOX_ACCENT});
+                transform: scale(1.02);  /* 悬停放大 */
+                box-shadow: {FOX_SHADOW};
+            }}
+            QPushButton:pressed {{
+                transform: scale(0.98);  /* 点击缩小 */
             }}
             QPushButton:disabled {{
                 background: rgba(200,180,160,0.5);
                 color: rgba(255,255,255,0.6);
+                box-shadow: none;
+                cursor: not-allowed;
             }}
         """)
         self.send_btn.clicked.connect(self._send_message)
@@ -629,7 +704,57 @@ class FoxChatDialog(QDialog):
 
         layout.addWidget(input_frame)
 
-        # 启动键盘监听(语音模式用 T 键)
+        # ---- 快捷操作栏（新增） ----
+        self.quick_actions = QHBoxLayout()
+        self.quick_actions.setSpacing(8)
+        self.quick_actions.setContentsMargins(0, 8, 0, 0)
+        
+        # 快捷按钮样式
+        quick_btn_style = f"""
+            QPushButton {{
+                background: rgba(255,176,124,0.3);
+                color: {FOX_DARK};
+                border: 1px solid {FOX_PEACH};
+                border-radius: 16px;
+                padding: 6px 14px;
+                font-size: 12px;
+                font-family: 'Segoe UI', sans-serif;
+                min-width: 60px;
+                transition: all 0.2s ease;
+            }}
+            QPushButton:hover {{
+                background: rgba(255,176,124,0.5);
+                border-color: {FOX_ORANGE};
+            }}
+            QPushButton:pressed {{
+                transform: scale(0.95);
+            }}
+        """
+        
+        # 创建快捷按钮
+        quick_actions = ["夸夸我", "讲个笑话", "今日运势"]
+        for action_text in quick_actions:
+            btn = QPushButton(action_text)
+            btn.setStyleSheet(quick_btn_style)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda checked, txt=action_text: self._quick_action(txt))
+            self.quick_actions.addWidget(btn)
+        
+        layout.addLayout(self.quick_actions)
+
+        # 打字指示器（初始隐藏）
+        self.typing_indicator = QLabel()
+        self.typing_indicator.setAlignment(Qt.AlignCenter)
+        self.typing_indicator.setVisible(False)
+        self.typing_indicator.setStyleSheet(f"""
+            background: transparent;
+            color: {FOX_ORANGE};
+            font-size: 12px;
+            padding: 8px;
+        """)
+        layout.addWidget(self.typing_indicator)
+
+        # 启动键盘监听 (语音模式用 T 键)
         self._start_key_listener()
 
     def _update_mode_btn_style(self):
@@ -754,34 +879,71 @@ class FoxChatDialog(QDialog):
             self._stop_voice_capture()
         super().keyReleaseEvent(event)
 
-    # ---- 消息显示 ----
-    def _add_msg(self, sender, text):
+    # ---- 消息显示（高端化设计） ----
+    def _add_msg(self, sender, text, show_avatar=True):
+        """添加消息，支持头像、阴影、非对称圆角、尾巴等高端效果"""
         if sender == "user":
-            name_span = f"<span style='color: {FOX_DARK}; font-weight: bold;'>🧑 你</span>"
-            bubble_bg = FOX_BUBBLE_USER
+            avatar_html = '<div style="width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,#FF8C42,#FFB07C);display:flex;align-items:center;justify-content:center;color:white;font-weight:bold;border:2px solid #E8C4A0;">你</div>'
+            bubble_bg = f"linear-gradient(180deg,{FOX_BUBBLE_USER},rgba(255,200,150,0.6))"  # 渐变背景
+            bubble_border_radius = "20px 4px 20px 20px"  # 右上角小圆角（尾巴效果）
             align = "right"
+            tail_css = "margin-right:12px;"  # 气泡与头像间距
+            margin_side = "left"  # 头像在右边
         else:
-            name_span = f"<span style='color: {FOX_ORANGE}; font-weight: bold;'>🦊 仙狐</span>"
-            bubble_bg = FOX_BUBBLE_AI
+            avatar_html = '<div style="width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,#FFB07C,#FF8C42);display:flex;align-items:center;justify-content:center;color:white;font-size:16px;border:2px solid #E8C4A0;">🦊</div>'
+            bubble_bg = f"linear-gradient(180deg,{FOX_BUBBLE_AI},rgba(255,240,220,0.7))"  # 渐变背景
+            bubble_border_radius = "4px 20px 20px 20px"  # 左上角小圆角（尾巴效果）
             align = "left"
-
+            tail_css = "margin-left:12px;"  # 气泡与头像间距
+            margin_side = "right"  # 头像在左边
+        
         escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
-
-        html = f"""
-        <div style="text-align:{align}; margin:8px 0;">
-            <div style="display:inline-block; background:{bubble_bg};
-                border-radius:14px; padding:10px 16px; max-width:80%;
-                text-align:left;">
-                <div style="margin-bottom:3px; font-size:12px;">{name_span}</div>
-                <div style="font-size:13px; line-height:1.5;">{escaped}</div>
+        
+        # 字体层级：标题用 Semibold，正文用常规字体
+        name_font = "font-family: 'Segoe UI Semibold', 'PingFang SC Medium', 'Microsoft YaHei UI', sans-serif; font-size:14px; font-weight:600;"
+        content_font = f"font-family: 'Segoe UI', 'Inter', 'Microsoft YaHei UI', sans-serif; font-size:13px; line-height:1.6; color:{FOX_SUBTEXT};"
+        
+        # 构建头像部分
+        avatar_part = ''
+        if show_avatar:
+            avatar_part = f'<div style="width:32px; flex-shrink:0; margin-{margin_side}:10px;">{avatar_html}</div>'
+        
+        # 名字颜色
+        name_color = FOX_DARK if align == 'left' else FOX_TEXT
+        display_name = f"🦊 仙狐" if sender == "assistant" else "🧑 你"
+        
+        html = f'''
+        <div style="display:flex; align-items:flex-start; text-align:{align}; margin:12px 16px;">
+            {avatar_part}
+            <div style="flex:1; display:flex; flex-direction:column; align-items:{align};">
+                <div style="{name_font} color:{name_color}; margin-bottom:4px;">
+                    {display_name}
+                </div>
+                <div style="display:inline-block; background:{bubble_bg};
+                    border-radius:{bubble_border_radius}; 
+                    padding:12px 18px; 
+                    max-width:70%;
+                    text-align:left;
+                    box-shadow:{FOX_SHADOW};
+                    {tail_css}
+                    position:relative;
+                    animation: messageFadeIn 0.2s ease-out;">
+                    <div style="{content_font}">{escaped}</div>
+                </div>
             </div>
         </div>
-        """
+        <style>
+            @keyframes messageFadeIn {{
+                from {{ opacity:0; transform:translateY(10px); }}
+                to {{ opacity:1; transform:translateY(0); }}
+            }}
+        </style>
+        '''
         self.chat_edit.append(html)
         sb = self.chat_edit.verticalScrollBar()
         sb.setValue(sb.maximum())
 
-    # ---- 发送消息 ----
+    # ---- 发送消息（带打字指示器） ----
     def _send_message(self, text=None):
         if text is None:
             text = self.input_edit.text().strip()
@@ -792,8 +954,53 @@ class FoxChatDialog(QDialog):
         self.input_edit.clear()
         self.send_btn.setEnabled(False)
         self.send_btn.setText("⏳")
+        
+        # 显示打字指示器
+        self._show_typing_indicator()
 
         self._process_input(text)
+
+    def _show_typing_indicator(self):
+        """显示打字指示器"""
+        self.typing_indicator.setVisible(True)
+        self.typing_indicator.setText("仙狐正在思考中... 🦊💭")
+        
+        # 动画效果：三个跳动的小圆点
+        QTimer.singleShot(500, self._animate_typing)
+
+    def _animate_typing(self):
+        """打字指示器动画"""
+        states = ["仙狐正在思考中... 🦊", "仙狐正在思考中.. 🦊", "仙狐正在思考中. 🦊"]
+        self._typing_state = getattr(self, '_typing_state', 0)
+        self.typing_indicator.setText(states[self._typing_state % 3])
+        self._typing_state += 1
+        QTimer.singleShot(500, self._animate_typing)
+
+    def _hide_typing_indicator(self):
+        """隐藏打字指示器"""
+        self.typing_indicator.setVisible(False)
+        if hasattr(self, '_typing_state'):
+            delattr(self, '_typing_state')
+
+    def _quick_action(self, action_text):
+        """快捷操作处理"""
+        quick_messages = {
+            "夸夸我": "哥哥夸你？让我想想... 哥哥今天真帅气，代码写得超棒，连桌宠都设计得这么精致！✨",
+            "讲个笑话": "🦊 为什么程序员总是分不清万圣节和圣诞节？因为 Oct 31 == Dec 25！😄",
+            "今日运势": "哥哥今日的运势是：💕 感情运超棒，工作顺顺利利，代码一次跑通没有 bug！"
+        }
+        message = quick_messages.get(action_text, "好的~")
+        self._add_msg("user", action_text)
+        self._show_typing_indicator()
+        # 延迟回复，模拟思考
+        QTimer.singleShot(800, lambda: self._quick_reply(message))
+
+    def _quick_reply(self, message):
+        """快捷回复"""
+        self._hide_typing_indicator()
+        self._add_msg("assistant", message)
+        self.send_btn.setEnabled(True)
+        self.send_btn.setText("🚀 发送")
 
     def _process_input(self, text):
         def on_command(result):
@@ -1027,16 +1234,18 @@ class FoxChatDialog(QDialog):
             ]
             def on_response(response):
                 cleaned = response.strip()
+                self._hide_typing_indicator()  # 隐藏打字指示器
                 self._add_msg("assistant", cleaned)
                 self.conversation.append({"role": "assistant", "content": cleaned})
                 self.send_btn.setEnabled(True)
-                self.send_btn.setText("发送")
+                self.send_btn.setText("🚀 发送")
             def on_error(err):
                 # 错误时也给一个友好的回复
+                self._hide_typing_indicator()  # 隐藏打字指示器
                 self._add_msg("assistant", f"🦊 {tool_result}\n\n（小狐仙正在努力学习中...）")
                 self.conversation.append({"role": "assistant", "content": tool_result})
                 self.send_btn.setEnabled(True)
-                self.send_btn.setText("发送")
+                self.send_btn.setText("🚀 发送")
             try:
                 import ollama
                 # 必须保存到 self 防止线程被垃圾回收时还在运行 → 闪退
@@ -1053,16 +1262,18 @@ class FoxChatDialog(QDialog):
 
         def on_response(response):
             cleaned = response.strip()
+            self._hide_typing_indicator()  # 隐藏打字指示器
             self._add_msg("assistant", cleaned)
             self.conversation.append({"role": "assistant", "content": cleaned})
             self.send_btn.setEnabled(True)
-            self.send_btn.setText("发送")
+            self.send_btn.setText("🚀 发送")
 
         def on_error(err):
+            self._hide_typing_indicator()  # 隐藏打字指示器
             self._add_msg("assistant", "😅 小狐仙走神了... 试试直接命令我:\n" +
                 "• 打开 记事本\n• 创建 test.txt\n• 删除 file.txt")
             self.send_btn.setEnabled(True)
-            self.send_btn.setText("发送")
+            self.send_btn.setText("🚀 发送")
 
         def on_reminder(text, minutes):
             """收到提醒工具的信号,创建实际的 QTimer"""
