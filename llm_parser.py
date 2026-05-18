@@ -310,46 +310,15 @@ JSON 格式：
                     "destination": None, "content": None,
                     "message": f"已{action_cn}{target}"}
 
-        # ---- 模式3：打开 ----
+        # ---- 模式 3：打开 ----
         for kw in ["打开", "进入", "启动", "运行"]:
             if kw in text:
                 target = text.replace(kw, "").strip()
-                # 去掉"文件夹"后缀
-                if target.endswith('文件夹'):
-                    target = target[:-3]
-                    target_type = 'folder'
-                elif target.endswith('目录'):
-                    target = target[:-2]
-                    target_type = 'folder'
-                else:
-                    target_type = _detect_target_type(target)
+                # 去掉"这个"等修饰词
+                target = re.sub(r'^(?:这个 | 那个 | 那个)', '', target).strip()
                 
-                if target:
-                    return {"success": True, "action": "open", "target": target,
-                            "target_type": target_type, "directory": None, 
-                            "destination": None, "content": None,
-                            "message": f"正在打开{target}..."}
-
-        # ---- 模式4：创建/新建 ----
-        for kw in ["创建", "新建"]:
-            if kw in text:
-                target = text.replace(kw, "").strip()
-                target = re.sub(r'^(?:命名为?|一个)\s*', '', target)
-                target_type = _detect_target_type(target)
-                if target:
-                    return {"success": True, "action": "create", "target": target,
-                            "target_type": target_type, "directory": None, 
-                            "destination": None, "content": None,
-                            "message": f"已创建{target}"}
-
-        # ---- 模式5：删除 ----
-        for kw in ["删除", "删掉"]:
-            if kw in text:
-                target = text.replace(kw, "").strip()
-                # 检查是否有上下文引用
-                context_dir = _extract_context_dir(text)
-                
-                # 判断目标类型
+                # 重要：先判断类型，再去掉后缀
+                target_type = None
                 if target.endswith('文件夹'):
                     target = target[:-3]
                     target_type = 'folder'
@@ -359,8 +328,92 @@ JSON 格式：
                 elif target.endswith('文件'):
                     target = target[:-2]
                     target_type = 'file'
+                elif '.' in target and len(target.split('.')[-1]) <= 4:
+                    # 有扩展名，肯定是文件
+                    target_type = 'file'
                 else:
-                    target_type = 'file'  # 默认按文件处理
+                    # 无后缀，根据上下文推断
+                    if '文件夹' in text:
+                        target_type = 'folder'
+                    elif '文件' in text:
+                        target_type = 'file'
+                    else:
+                        # 默认调用检测函数（会检查是否为程序）
+                        target_type = _detect_target_type(target)
+                
+                if target and target_type:
+                    return {"success": True, "action": "open", "target": target,
+                            "target_type": target_type, "directory": None, 
+                            "destination": None, "content": None,
+                            "message": f"正在打开{target}..."}
+
+        # ---- 模式 4：创建/新建 ----
+        for kw in ["创建", "新建"]:
+            if kw in text:
+                target = text.replace(kw, "").strip()
+                target = re.sub(r'^(?:命名为？|一个)\s*', '', target)
+                
+                # 重要：先判断类型，再去掉后缀
+                target_type = None
+                if target.endswith('文件夹'):
+                    target = target[:-3]
+                    target_type = 'folder'
+                elif target.endswith('目录'):
+                    target = target[:-2]
+                    target_type = 'folder'
+                elif target.endswith('文件'):
+                    target = target[:-2]
+                    target_type = 'file'
+                elif '.' in target and len(target.split('.')[-1]) <= 4:
+                    # 有扩展名，肯定是文件
+                    target_type = 'file'
+                else:
+                    # 无后缀，根据上下文推断
+                    if '文件夹' in text:
+                        target_type = 'folder'
+                    elif '文件' in text:
+                        target_type = 'file'
+                    else:
+                        # 默认调用检测函数
+                        target_type = _detect_target_type(target)
+                
+                if target and target_type:
+                    return {"success": True, "action": "create", "target": target,
+                            "target_type": target_type, "directory": None, 
+                            "destination": None, "content": None,
+                            "message": f"已创建{target}"}
+
+        # ---- 模式 5：删除 ----
+        for kw in ["删除", "删掉"]:
+            if kw in text:
+                target = text.replace(kw, "").strip()
+                # 检查是否有上下文引用
+                context_dir = _extract_context_dir(text)
+                
+                # 重要：先判断类型，再去掉后缀
+                # 这样能正确区分"丑橘文件"（文件名为"丑橘"）和"丑橘"（文件名就是"丑橘"）
+                if target.endswith('文件夹'):
+                    target = target[:-3]
+                    target_type = 'folder'
+                elif target.endswith('目录'):
+                    target = target[:-2]
+                    target_type = 'folder'
+                elif target.endswith('文件'):
+                    target = target[:-2]
+                    target_type = 'file'
+                elif '.' in target and len(target.split('.')[-1]) <= 4:
+                    # 有扩展名，肯定是文件
+                    target_type = 'file'
+                else:
+                    # 无后缀、无扩展名，根据上下文推断
+                    # 如果原文中有"文件"字样（如"删除丑橘文件"），说明 target 已经是去掉后缀后的
+                    # 如果原文中没有"文件"字样，默认按文件处理
+                    if '文件' in text and '文件夹' not in text:
+                        target_type = 'file'
+                    elif '文件夹' in text:
+                        target_type = 'folder'
+                    else:
+                        target_type = 'file'  # 默认按文件处理
                 
                 if target:
                     return {"success": True, "action": "delete", "target": target,
@@ -368,25 +421,47 @@ JSON 格式：
                             "destination": None, "content": None,
                             "message": f"已删除{target}"}
 
-        # ---- 模式6：移动 ----
+        # ---- 模式 6：移动 ----
         if "移动" in text and "到" in text:
             parts = text.split("移动", 1)[1].split("到", 1)
             if len(parts) == 2:
                 target = parts[0].strip()
                 dest = parts[1].strip()
-                # 去掉"文件夹"后缀
+                
+                # 重要：先判断类型，再去掉后缀
+                target_type = None
                 if target.endswith('文件夹'):
                     target = target[:-3]
+                    target_type = 'folder'
+                elif target.endswith('目录'):
+                    target = target[:-2]
+                    target_type = 'folder'
+                elif target.endswith('文件'):
+                    target = target[:-2]
+                    target_type = 'file'
+                elif '.' in target and len(target.split('.')[-1]) <= 4:
+                    # 有扩展名，肯定是文件
+                    target_type = 'file'
+                else:
+                    # 无后缀，根据上下文推断
+                    if '文件夹' in text:
+                        target_type = 'folder'
+                    elif '文件' in text:
+                        target_type = 'file'
+                    else:
+                        target_type = self._detect_target_type(target)
+                
                 # 解析驱动器路径（使用类方法）
                 dest = self._resolve_drive_path(dest)
-                # 特殊处理：LLM可能把"桌宠"识别为"桌面"
+                # 特殊处理：LLM 可能把"桌宠"识别为"桌面"
                 if "桌面" in parts[1] and "桌宠" in text:
                     dest = self._resolve_drive_path("桌宠")
-                target_type = self._detect_target_type(target)
-                return {"success": True, "action": "move",
-                        "target": target, "target_type": target_type,
-                        "destination": dest, "directory": None, "content": None,
-                        "message": "已移动文件"}
+                
+                if target_type:
+                    return {"success": True, "action": "move",
+                            "target": target, "target_type": target_type,
+                            "destination": dest, "directory": None, "content": None,
+                            "message": "已移动文件"}
 
         # ---- 模式7：查看 ----
         for kw in ["查看", "看看"]:

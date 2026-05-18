@@ -590,9 +590,12 @@ class FileManager:
         if app_path:
             try:
                 if app_path.startswith("ms-"):
-                    subprocess.run(["start", app_path], shell=True, timeout=5)
+                    # 使用上下文管理器确保资源正确释放
+                    with subprocess.Popen([app_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as proc:
+                        proc.wait(timeout=5)
                 else:
-                    subprocess.Popen([app_path])
+                    # 使用 subprocess.run 替代 Popen，自动管理进程资源
+                    subprocess.run([app_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
                 return {"success": True, "message": f"正在打开 {name}..."}
             except Exception as e:
                 return {"success": False, "message": f"打开 {name} 失败：{str(e)}"}

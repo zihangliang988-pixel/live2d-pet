@@ -5,7 +5,8 @@
 右键菜单:开始聊天 / 功能概览 / 关闭
 """
 
-import sys, os, json, threading, time as time_module
+import sys, os, json, threading, time as time_module, re
+from typing import Optional
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
@@ -22,7 +23,7 @@ from PyQt5.QtWidgets import (
     QDialog, QTextEdit, QLineEdit, QPushButton, QFrame, QLabel,
     QSizeGrip, QStackedWidget
 )
-from PyQt5.QtCore import Qt, QTimer, QPoint, QUrl, pyqtSignal, QThread
+from PyQt5.QtCore import Qt, QTimer, QPoint, QUrl, pyqtSignal, QThread, QEvent
 from PyQt5.QtGui import QFont, QColor, QPixmap, QIcon
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 
@@ -115,6 +116,15 @@ class ToolChatThread(QThread):
 
             # 如果有工具调用，执行并返回结果
             if msg.get('tool_calls'):
+                # 重要：先将 assistant 的 tool_calls 消息回写到主对话历史
+                # 这样上下文才完整：assistant 调用工具 -> tool 返回结果
+                if self.conversation_ref is not None:
+                    self.conversation_ref.append({
+                        "role": "assistant",
+                        "content": msg.get('content', ''),
+                        "tool_calls": msg['tool_calls']
+                    })
+                
                 for tc in msg['tool_calls']:
                     result = execute_tool_call(tc)
                     tool_name = tc['function']['name']
@@ -386,13 +396,99 @@ class FoxPet(QWidget):
         dlg.exec_()
 
     def _confirm_exit(self):
-        from PyQt5.QtWidgets import QMessageBox
-        reply = QMessageBox.question(
-            self, "🦊 仙狐", "真的要走吗... 我会想你的 😢",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-        )
-        if reply == QMessageBox.Yes:
-            self.close()
+        """自定义样式关闭确认弹窗"""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("关闭仙狐")
+        dlg.setFixedSize(360, 220)
+        dlg.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        dlg.setAttribute(Qt.WA_TranslucentBackground)
+
+        frame = QFrame(dlg)
+        frame.setGeometry(0, 0, 360, 220)
+        frame.setStyleSheet(f"""
+            QFrame {{
+                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 {FOX_LIGHT}, stop:0.5 {FOX_BG1}, stop:1 {FOX_BG2});
+                border-radius: 16px;
+                border: 1px solid {FOX_BORDER};
+            }}
+        """)
+
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(24, 20, 24, 16)
+        layout.setSpacing(10)
+
+        # 图标区域
+        icon_label = QLabel("🦊")
+        icon_label.setAlignment(Qt.AlignCenter)
+        icon_label.setFont(QFont("Segoe UI", 36))
+        icon_label.setStyleSheet("background: transparent;")
+        layout.addWidget(icon_label)
+
+        # 文字
+        msg = QLabel("真的要走吗... 我会想你的 😢")
+        msg.setAlignment(Qt.AlignCenter)
+        msg.setFont(QFont("Microsoft YaHei UI", 12))
+        msg.setStyleSheet(f"color: {FOX_TEXT}; background: transparent;")
+        msg.setWordWrap(True)
+        layout.addWidget(msg)
+
+        layout.addStretch()
+
+        # 按钮行
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(12)
+
+        no_btn = QPushButton("😊 我开玩笑的")
+        no_btn.setFixedHeight(38)
+        no_btn.setCursor(Qt.PointingHandCursor)
+        no_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: rgba(232,196,160,0.3);
+                color: {FOX_TEXT};
+                border: 1px solid {FOX_BORDER};
+                border-radius: 10px;
+                font-size: 13px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{ background: rgba(232,196,160,0.5); }}
+        """)
+        no_btn.clicked.connect(dlg.close)
+        btn_row.addWidget(no_btn, stretch=1)
+
+        yes_btn = QPushButton("😢 再见")
+        yes_btn.setFixedHeight(38)
+        yes_btn.setCursor(Qt.PointingHandCursor)
+        yes_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                    stop:0 {FOX_ORANGE}, stop:1 {FOX_PEACH});
+                color: white;
+                border: none;
+                border-radius: 10px;
+                font-size: 13px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                    stop:0 {FOX_BTN_HOVER}, stop:1 {FOX_ACCENT});
+            }}
+        """)
+        yes_btn.clicked.connect(lambda: (dlg.close(), self.close()))
+        btn_row.addWidget(yes_btn, stretch=1)
+
+        layout.addLayout(btn_row)
+
+        dlg.exec_()
+
+    def closeEvent(self, event):
+        """窗口关闭事件 - 清理资源"""
+        # 清理 WebView
+        if hasattr(self, 'webview'):
+            self.webview.deleteLater()
+        
+        # 清理所有资源
+        event.accept()
 
 
 # ======================================================================
@@ -420,6 +516,8 @@ class FoxChatDialog(QDialog):
         self.llm_parser = None
         self.llm_thread = None
         self.cmd_thread = None
+        # 线程管理：保存所有线程引用，确保资源正确释放
+        self._background_threads = []
         self._init_llm()
 
         # 最近打开的文件夹(用于后续操作)
@@ -440,6 +538,35 @@ class FoxChatDialog(QDialog):
             self.input_edit.setText(initial_text)
             self._send_message()
 
+        # ---- 淡入动画 ----
+        self._fade_opacity = 0.0
+        self._fade_in_timer = QTimer(self)
+        self._fade_in_timer.timeout.connect(self._fade_in_step)
+        self._fade_in_timer.start(16)
+
+    def _fade_in_step(self):
+        self._fade_opacity = min(1.0, self._fade_opacity + 0.08)
+        self.setWindowOpacity(self._fade_opacity)
+        if self._fade_opacity >= 1.0:
+            self._fade_in_timer.stop()
+
+    def _fade_out_close(self):
+        """淡出后关闭"""
+        self._fade_in_timer.stop()
+        if hasattr(self, '_fade_out_timer') and self._fade_out_timer.isActive():
+            return
+        self._fade_out_timer = QTimer(self)
+        self._fade_out_timer.timeout.connect(self._fade_out_step)
+        self._fade_out_opacity = self.windowOpacity()
+        self._fade_out_timer.start(16)
+
+    def _fade_out_step(self):
+        self._fade_out_opacity = max(0, self._fade_out_opacity - 0.1)
+        self.setWindowOpacity(self._fade_out_opacity)
+        if self._fade_out_opacity <= 0:
+            self._fade_out_timer.stop()
+            self.close()
+
     def _init_llm(self):
         try:
             from llm_parser import LLMCommandParser
@@ -459,11 +586,12 @@ class FoxChatDialog(QDialog):
             "知识设定": {"身份": "住在电脑里的小狐狸精"}
         }
         try:
-            char = json.load(open('character.json', 'r', encoding='utf-8'))
+            with open('character.json', 'r', encoding='utf-8') as f:
+                char = json.load(f)
             print("[仙狐] 加载性格配置 ✓")
             return char
         except Exception as e:
-            print(f"[仙狐] 使用默认性格配置: {e}")
+            print(f"[仙狐] 使用默认性格配置：{e}")
             return default
 
     def _build_system_prompt(self):
@@ -540,20 +668,28 @@ class FoxChatDialog(QDialog):
         hdr_layout.setContentsMargins(0, 0, 0, 0)
 
         close_btn = QPushButton("✕")
-        close_btn.setFixedSize(28, 28)
+        close_btn.setFixedSize(30, 30)
         close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setToolTip("关闭")
         close_btn.setStyleSheet(f"""
             QPushButton {{
-                background: rgba(255,180,120,0.3);
+                background: rgba(255,180,120,0.25);
                 color: {FOX_TEXT};
-                border: none;
-                border-radius: 14px;
+                border: 1px solid rgba(232,196,160,0.3);
+                border-radius: 15px;
                 font-size: 14px;
                 font-weight: bold;
             }}
-            QPushButton:hover {{ background: rgba(255,100,80,0.4); color: #d44; }}
+            QPushButton:hover {{
+                background: rgba(255,90,70,0.35);
+                color: #d44;
+                border-color: rgba(255,90,70,0.5);
+            }}
+            QPushButton:pressed {{
+                background: rgba(255,60,40,0.5);
+            }}
         """)
-        close_btn.clicked.connect(self.close)
+        close_btn.clicked.connect(self._fade_out_close)
         hdr_layout.addWidget(close_btn)
 
         hdr_layout.addStretch()
@@ -704,44 +840,6 @@ class FoxChatDialog(QDialog):
 
         layout.addWidget(input_frame)
 
-        # ---- 快捷操作栏（新增） ----
-        self.quick_actions = QHBoxLayout()
-        self.quick_actions.setSpacing(8)
-        self.quick_actions.setContentsMargins(0, 8, 0, 0)
-        
-        # 快捷按钮样式
-        quick_btn_style = f"""
-            QPushButton {{
-                background: rgba(255,176,124,0.3);
-                color: {FOX_DARK};
-                border: 1px solid {FOX_PEACH};
-                border-radius: 16px;
-                padding: 6px 14px;
-                font-size: 12px;
-                font-family: 'Segoe UI', sans-serif;
-                min-width: 60px;
-                transition: all 0.2s ease;
-            }}
-            QPushButton:hover {{
-                background: rgba(255,176,124,0.5);
-                border-color: {FOX_ORANGE};
-            }}
-            QPushButton:pressed {{
-                transform: scale(0.95);
-            }}
-        """
-        
-        # 创建快捷按钮
-        quick_actions = ["夸夸我", "讲个笑话", "今日运势"]
-        for action_text in quick_actions:
-            btn = QPushButton(action_text)
-            btn.setStyleSheet(quick_btn_style)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.clicked.connect(lambda checked, txt=action_text: self._quick_action(txt))
-            self.quick_actions.addWidget(btn)
-        
-        layout.addLayout(self.quick_actions)
-
         # 打字指示器（初始隐藏）
         self.typing_indicator = QLabel()
         self.typing_indicator.setAlignment(Qt.AlignCenter)
@@ -824,7 +922,9 @@ class FoxChatDialog(QDialog):
             except Exception:
                 pass
 
+        # 保存线程引用，确保资源管理
         t = threading.Thread(target=listen_keys, daemon=True)
+        self._background_threads.append(t)
         t.start()
 
     def _start_voice_capture(self):
@@ -851,7 +951,9 @@ class FoxChatDialog(QDialog):
             except Exception as e:
                 QTimer.singleShot(0, lambda: self._on_voice_text(None))
 
+        # 保存线程引用，确保资源管理
         t = threading.Thread(target=do_voice, daemon=True)
+        self._background_threads.append(t)
         t.start()
 
     def _stop_voice_capture(self):
@@ -1003,6 +1105,35 @@ class FoxChatDialog(QDialog):
         self.send_btn.setText("🚀 发送")
 
     def _process_input(self, text):
+        # 修复 3：检查是否有待确认的创建操作
+        if hasattr(self, '_pending_create') and self._pending_create:
+            pending = self._pending_create
+            if '文件' in text or '文件夹' in text:
+                # 用户确认了类型
+                target = pending['target']
+                directory = pending['directory']
+                
+                if '文件夹' in text:
+                    # 创建文件夹
+                    r = self.file_manager.create_folder(target, directory=directory or None)
+                    if r["success"]:
+                        self._add_msg("assistant", f"✅ 已创建文件夹：{target}")
+                    else:
+                        self._add_msg("assistant", f"❌ {r['message']}")
+                else:
+                    # 创建文件
+                    r = self.file_manager.create_file(target, directory=directory or None)
+                    if r["success"]:
+                        self._add_msg("assistant", f"✅ 已创建文件：{target}")
+                    else:
+                        self._add_msg("assistant", f"❌ {r['message']}")
+                
+                # 清除待确认状态
+                delattr(self, '_pending_create')
+                self.send_btn.setEnabled(True)
+                self.send_btn.setText("🚀 发送")
+                return
+        
         def on_command(result):
             if result.get("success") and result.get("action") != "unknown":
                 self._execute_command(result)
@@ -1035,7 +1166,7 @@ class FoxChatDialog(QDialog):
         target_type = result.get("target_type")  # 新增：目标类型
 
         target = (result.get("target") or "").strip()
-        dest = (result.get("destination") or "").strip()
+        destination = (result.get("destination") or "").strip()  # 修复 1：统一使用 destination
         directory = (result.get("directory") or "").strip()
         
         # 解析上下文目录引用
@@ -1060,6 +1191,12 @@ class FoxChatDialog(QDialog):
                 # 边界检查：创建需要文件名/文件夹名
                 if not target:
                     r = {"success": False, "message": "请告诉我要创建的文件名或文件夹名"}
+                elif target_type == 'unknown':
+                    # 类型不明确，询问用户确认
+                    self._add_msg("assistant", f"🤔 你想创建「{target}」是文件还是文件夹呢？\n\n• 回复「文件」创建文件\n• 回复「文件夹」创建文件夹")
+                    # 设置一个临时状态，等待用户确认
+                    self._pending_create = {"target": target, "directory": directory}
+                    r = {"success": False, "message": "等待用户确认类型"}
                 else:
                     # 如果没有指定目录，使用最近打开的文件夹
                     if not directory and self._last_opened_folder:
@@ -1069,7 +1206,7 @@ class FoxChatDialog(QDialog):
                     if target_type == 'folder':
                         r = self.file_manager.create_folder(target, directory=directory or None)
                     else:
-                        # 默认创建文件（包括 target_type 为 file 或 unknown）
+                        # target_type 为 file
                         r = self.file_manager.create_file(target, directory=directory or None)
 
             elif action == "delete":
@@ -1086,22 +1223,22 @@ class FoxChatDialog(QDialog):
                 
                 r = self.file_manager.delete_file(target, directory=search_dir)
                 
-                # 如果带了目录还是没找到，取消目录限制再搜一次
-                if not r["success"] and search_dir:
-                    r2 = self.file_manager.delete_file(target, directory=None)
-                    if r2["success"]:
-                        r = r2
-                elif not r["success"] and not search_dir:
-                    # 没有上下文目录，给出友好提示
-                    r["message"] = f"没找到 '{target}' 哦。请先打开一个文件夹，或者说清楚文件位置~"
+                # 修复：不要二次尝试全局搜索，避免误删同名文件
+                # 如果没找到，直接给出明确提示
+                if not r["success"]:
+                    if search_dir:
+                        r["message"] = f"在「{search_dir}」中没找到 '{target}' 哦~ 请确认文件名或打开正确的文件夹"
+                    else:
+                        r["message"] = f"没找到 '{target}' 哦。请先打开一个文件夹，或者说清楚文件位置~"
 
             elif action == "move":
                 if not target:
                     r = {"success": False, "message": "请告诉我要移动的文件"}
-                elif not dest:
+                elif not destination:  # 修复 1：使用 destination
                     r = {"success": False, "message": "请告诉我目标位置"}
                 else:
-                    r = self.file_manager.move_file(target, dest)
+                    # 修复 1：使用关键字参数，更清晰
+                    r = self.file_manager.move_file(name=target, target_dir=destination)
 
             elif action == "view":
                 r = self.file_manager.view_file(target)
@@ -1139,88 +1276,133 @@ class FoxChatDialog(QDialog):
         }
         return action_map.get(action, action)
 
-    def _try_direct_tool(self, text):
-        """关键词检测,直接调工具(不依赖 LLM tool calling)"""
-        import re
-        from tools import _weather, _sysinfo, _myip, _quote, _fortune, _password, _remind
-
-        # 提醒:检测"提醒/记得/叫我/闹钟"关键词
-        if any(k in text for k in ['提醒', '记得', '叫我', '闹钟']):
-            m = re.search(r'(\d+)\s*(?:分|分钟|秒|小时)', text)
-            minutes = int(m.group(1)) if m else 5
-            # 如果是秒,转成分钟(向上取整)
-            if m and '秒' in m.group(0):
-                minutes = max(1, (int(m.group(1)) + 59) // 60)
-            # 提取提醒内容(去掉关键词和时间部分)
-            for kw in ['提醒我', '提醒', '记得', '叫我']:
-                if kw in text:
-                    reminder_text = text.split(kw, 1)[1].strip()
-                    break
-            else:
-                reminder_text = text
-            reminder_text = re.sub(r'\d+\s*(?:分|分钟|秒|小时)\s*(?:后|以后)?', '', reminder_text).strip()
-            if not reminder_text:
-                reminder_text = "时间到了！"
-
-            result = _remind(reminder_text, minutes)
-            # 直接调度实际定时器
-            def fire():
-                self._add_msg("assistant", f"⏰ 提醒：{reminder_text}")
-                from PyQt5.QtWidgets import QApplication
-                app = QApplication.instance()
-                if app:
-                    app.alert(self, 3000)
-            from PyQt5.QtCore import QTimer
-            QTimer.singleShot(minutes * 60 * 1000, fire)
-
-            return f"✅ {result.get('message', '')}"
-
-        # 天气:包含城市名/天气关键词
-        m = re.search(r'([\u4e00-\u9fa5]{2,4})(?:的)?(?:天气|气温|温度|冷不冷|热不热|下雨|下雪|刮风)', text)
-        if m:
-            city = m.group(1)
-            # 排除非城市名
-            if city not in ('今天', '明天', '后天', '昨天', '什么', '怎么'):
-                result = _weather(city)
-                return f"{result.get('city','')}天气:{result.get('weather','')},{result.get('temp','')},{result.get('wind','')}"
-        if '天气' in text:
-            result = _weather('北京')
-            return f"{result.get('city','')}天气:{result.get('weather','')},{result.get('temp','')},{result.get('wind','')}"
-
-        if any(k in text for k in ['电脑状态', '系统状态', 'cpu', 'CPU', '内存', '性能']):
+    def _try_direct_tool(self, text: str) -> Optional[str]:
+        """三级意图识别漏斗：快速匹配 → 增强匹配 → 兜底返回 None"""
+        
+        # ========== 第 1 层：快捷命令匹配（<10ms）==========
+        # 精确匹配高频命令，直接执行
+        quick_commands = {
+            "天气": lambda: self._weather_quick(text),
+            "查天气": lambda: self._weather_quick(text),
+            "系统": lambda: self._sysinfo_quick(),
+            "IP": lambda: self._myip_quick(),
+            "运势": lambda: self._fortune_quick(),
+            "密码": lambda: self._password_quick(text),
+            "语录": lambda: _quote(),
+            "一言": lambda: _quote(),
+        }
+        
+        for keyword, handler in quick_commands.items():
+            if keyword in text:
+                try:
+                    result = handler()
+                    if result and 'error' not in str(result).lower():
+                        return result
+                except Exception:
+                    pass
+        
+        # ========== 第 2 层：增强关键词匹配（<50ms）==========
+        # 扩展正则 + 同义词表，覆盖更多自然表达
+        
+        # 天气：支持更多自然表达
+        weather_patterns = [
+            r'([一-龥]{2,4})(?:的)?(?:天气 | 气温 | 温度 | 冷不冷 | 热不热 | 下雨 | 下雪 | 刮风 | 适不适合出门 | 要不要带伞)',
+            r'(?:今天 | 明天 | 现在 | 外面)(?:是)?(?:什么)?(?:天气 | 情况)?(?:吗 | 呀 | 吗)?',
+            r'(?:冷 | 热 | 暖和 | 凉快)',
+            r'(?:查看 | 查询 | 看看 | 告诉我)?(?:一下)?(?:天气 | 气温 | 温度)',  # 新增：查看天气、查询天气等
+        ]
+        
+        for pattern in weather_patterns:
+            m = re.search(pattern, text, re.IGNORECASE)
+            if m:
+                if m.group(1):  # 有城市名
+                    city = m.group(1)
+                    if city not in ('今天', '明天', '后天', '昨天', '什么', '怎么', '外面', '现在'):
+                        result = _weather(city)
+                        return f"{result.get('city','')}天气:{result.get('weather','')},{result.get('temp','')}"
+                else:  # 默认天津（用户所在地）
+                    result = _weather('天津')
+                    return f"{result.get('city','')}天气:{result.get('weather','')},{result.get('temp','')}"
+        
+        # 系统状态：扩展关键词
+        if any(k in text for k in ['电脑状态', '系统状态', 'cpu', 'CPU', '内存', '性能', '电脑怎么样', '运行状态']):
             result = _sysinfo()
             if isinstance(result, dict) and 'error' not in result:
-                return f"系统:{result.get('system','')}\nCPU:{result.get('cpu','')}\n内存:{result.get('memory','')}"
-
-        if any(k in text for k in ['我的IP', 'IP在哪', 'ip地址', '外网']):
+                return f"系统:{result.get('system','')}\\nCPU:{result.get('cpu','')}\\n内存:{result.get('memory','')}"
+        
+        # IP 查询：扩展关键词
+        if any(k in text for k in ['我的 IP', 'IP 在哪', 'ip 地址', '外网', '公网 IP', 'IP 是多少', '网络地址']):
             result = _myip()
             if isinstance(result, dict) and 'error' not in result:
-                return f"IP:{result.get('ip','')}\n归属地:{result.get('country','')} {result.get('region','')} {result.get('city','')}\n运营商:{result.get('isp','')}"
-
-        if any(k in text for k in ['来句', '语录', '鸡汤', '一言', '名言']):
+                return f"IP:{result.get('ip','')}\\n归属地:{result.get('country','')} {result.get('region','')} {result.get('city','')}"
+        
+        # 语录：扩展关键词
+        if any(k in text for k in ['来句', '语录', '鸡汤', '一言', '名言', '金句', '励志', '鼓励']):
             return _quote()
-
-        if any(k in text for k in ['运势', '占卜', '运气', '抽签', '今天运气']):
+        
+        # 运势：扩展关键词
+        if any(k in text for k in ['运势', '占卜', '运气', '抽签', '今天运气', '运气的怎么样', '吉利']):
             result = _fortune()
             if isinstance(result, dict):
-                return f"今日运势:{result.get('level','')}\n建议:{result.get('advice','')}\n幸运色:{result.get('lucky_color','')}"
-
-        if any(k in text for k in ['密码', '生成密码', '随机密码']):
-            m = re.search(r'(\d+)位', text)
+                return f"今日运势:{result.get('level','')}\\n建议:{result.get('advice','')}"
+        
+        # 密码：扩展关键词
+        if any(k in text for k in ['密码', '生成密码', '随机密码', '强密码', '复杂密码']):
+            m = re.search(r'(\d+) 位', text)
             length = int(m.group(1)) if m else 16
             result = _password(length)
-            return f"生成的密码({length}位):{result.get('password','')}"
-
+            return f"生成的密码 ({length} 位):{result.get('password','')}"
+        
+        # ========== 第 3 层：未匹配，返回 None 由 LLM 处理 ==========
+        # 复杂表达、多意图、模糊意图交给 LLM
         return None
+    
+    # ========== 快捷命令处理器 ==========
+    def _weather_quick(self, text: str) -> Optional[str]:
+        """快速天气查询"""
+        m = re.search(r'([一-龥]{2,4})', text)
+        city = m.group(1) if m else '天津'
+        if city in ('今天', '明天', '现在', '外面'):
+            city = '天津'
+        result = _weather(city)
+        return f"{result.get('city','')}天气:{result.get('weather','')},{result.get('temp','')}"
+    
+    def _sysinfo_quick(self) -> str:
+        """快速系统信息"""
+        result = _sysinfo()
+        if isinstance(result, dict) and 'error' not in result:
+            return f"系统:{result.get('system','')}\\nCPU:{result.get('cpu','')}\\n内存:{result.get('memory','')}"
+        return None
+    
+    def _myip_quick(self) -> str:
+        """快速 IP 查询"""
+        result = _myip()
+        if isinstance(result, dict) and 'error' not in result:
+            return f"IP:{result.get('ip','')}\\n归属地:{result.get('city','')}"
+        return None
+    
+    def _fortune_quick(self) -> str:
+        """快速运势查询"""
+        result = _fortune()
+        if isinstance(result, dict):
+            return f"今日运势:{result.get('level','')}\\n建议:{result.get('advice','')}"
+        return None
+    
+    def _password_quick(self, text: str) -> str:
+        """快速密码生成"""
+        m = re.search(r'(\d+) 位', text)
+        length = int(m.group(1)) if m else 16
+        result = _password(length)
+        return f"生成的密码 ({length} 位):{result.get('password','')}"
 
     def _chat_with_llm(self, text):
         # 先试直接调工具
         tool_result = self._try_direct_tool(text)
         if tool_result:
             # 用 LLM 润色成自然语言
-            self.conversation.append({"role": "user", "content": text})
-            # 先把工具结果写进历史，确保后续对话能引用
-            self.conversation.append({"role": "tool", "content": tool_result})
+            # 注意：延迟添加消息，确保上下文一致性
+            user_message = {"role": "user", "content": text}
+            tool_message = {"role": "tool", "content": tool_result}
             
             # 优化提示词：让 LLM 用对话式语气回复
             brief = [
@@ -1236,14 +1418,21 @@ class FoxChatDialog(QDialog):
                 cleaned = response.strip()
                 self._hide_typing_indicator()  # 隐藏打字指示器
                 self._add_msg("assistant", cleaned)
+                # 成功后再添加消息到上下文
+                self.conversation.append(user_message)
+                self.conversation.append(tool_message)
                 self.conversation.append({"role": "assistant", "content": cleaned})
                 self.send_btn.setEnabled(True)
                 self.send_btn.setText("🚀 发送")
             def on_error(err):
                 # 错误时也给一个友好的回复
                 self._hide_typing_indicator()  # 隐藏打字指示器
-                self._add_msg("assistant", f"🦊 {tool_result}\n\n（小狐仙正在努力学习中...）")
-                self.conversation.append({"role": "assistant", "content": tool_result})
+                error_msg = f"🦊 {tool_result}\n\n（小狐仙正在努力学习中...）"
+                self._add_msg("assistant", error_msg)
+                # 出错时也记录上下文
+                self.conversation.append(user_message)
+                self.conversation.append(tool_message)
+                self.conversation.append({"role": "assistant", "content": error_msg})
                 self.send_btn.setEnabled(True)
                 self.send_btn.setText("🚀 发送")
             try:
@@ -1258,20 +1447,27 @@ class FoxChatDialog(QDialog):
             return
 
         # 正常走 LLM
-        self.conversation.append({"role": "user", "content": text})
-
+        # 注意：先不 append user 消息，等成功后再添加，避免出错时上下文不一致
+        user_message = {"role": "user", "content": text}
+        
         def on_response(response):
             cleaned = response.strip()
             self._hide_typing_indicator()  # 隐藏打字指示器
             self._add_msg("assistant", cleaned)
+            # 成功后再添加 user 和 assistant 消息到上下文
+            self.conversation.append(user_message)
             self.conversation.append({"role": "assistant", "content": cleaned})
             self.send_btn.setEnabled(True)
             self.send_btn.setText("🚀 发送")
 
         def on_error(err):
             self._hide_typing_indicator()  # 隐藏打字指示器
-            self._add_msg("assistant", "😅 小狐仙走神了... 试试直接命令我:\n" +
-                "• 打开 记事本\n• 创建 test.txt\n• 删除 file.txt")
+            error_msg = "😅 小狐仙走神了... 试试直接命令我:\n" +\
+                "• 打开 记事本\n• 创建 test.txt\n• 删除 file.txt"
+            self._add_msg("assistant", error_msg)
+            # 出错时也记录，但标记为错误回复
+            self.conversation.append(user_message)
+            self.conversation.append({"role": "assistant", "content": error_msg})
             self.send_btn.setEnabled(True)
             self.send_btn.setText("🚀 发送")
 
@@ -1290,7 +1486,13 @@ class FoxChatDialog(QDialog):
         try:
             import ollama
             from tools import get_ollama_tools
-            recent = self.conversation[-10:]
+            
+            # 智能上下文管理：确保 system prompt 始终保留
+            # 保留 system prompt + 最近 9 条消息（避免 system prompt 被截断）
+            system_prompt = self.conversation[0]  # 始终保留系统提示
+            recent_messages = self.conversation[-9:] if len(self.conversation) > 10 else self.conversation[1:]
+            recent = [system_prompt] + recent_messages
+            
             tools = get_ollama_tools()
             # 传入 conversation 引用以便回写工具调用结果
             self.llm_thread = ToolChatThread(recent, tools, conversation_ref=self.conversation)
@@ -1318,40 +1520,84 @@ class FoxChatDialog(QDialog):
             self._dragging = False
             event.accept()
 
-    # ---- 阻止回车关闭对话框 ----
+    # ---- 阻止回车关闭 + Escape 淡出 ----
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
             # 输入框的回车由 returnPressed 处理,不传播到 dialog
             if self.input_edit.hasFocus():
                 event.accept()
                 return
+        if event.key() == Qt.Key_Escape:
+            self._fade_out_close()
+            event.accept()
+            return
         super().keyPressEvent(event)
 
     def closeEvent(self, event):
-        # 停止键盘监听线程
-        self._key_thread_running = False
+        if getattr(self, '_fade_out_completed', False):
+            # 淡出已完成,执行真正的清理
+            self._cleanup()
+            super().closeEvent(event)
+            return
+        # 拦截关闭,改为淡出
+        event.ignore()
+        self._fade_out_close()
 
-        # 等待已知的 QThread 结束(避免遍历 dir(self) 的性能损耗)
+    def _fade_out_close(self):
+        if getattr(self, '_fade_closing', False):
+            return
+        self._fade_closing = True
+        self._fade_out_timer = QTimer(self)
+        self._fade_out_timer.timeout.connect(self._fade_out_step)
+        self._fade_out_opacity = self.windowOpacity()
+        self._fade_out_timer.start(16)
+
+    def _fade_out_step(self):
+        self._fade_out_opacity = max(0, self._fade_out_opacity - 0.1)
+        self.setWindowOpacity(self._fade_out_opacity)
+        if self._fade_out_opacity <= 0:
+            self._fade_out_timer.stop()
+            self._fade_out_completed = True
+            # 直接调用 QDialog.close, bypass 拦截
+            QDialog.close(self)
+
+    def _cleanup(self):
+        """关闭前的资源清理"""
+        self._key_thread_running = False
+        
+        # 清理 QThread 线程
         _known_threads = ['llm_thread', 'cmd_thread']
         for name in _known_threads:
             attr = getattr(self, name, None)
             if attr is not None and isinstance(attr, QThread) and attr.isRunning():
                 attr.quit()
                 attr.wait(2000)
-
-        super().closeEvent(event)
+        
+        # 清理后台线程 (threading.Thread)
+        # 等待所有后台线程自然结束 (daemon 线程会在程序退出时自动终止)
+        for thread in getattr(self, '_background_threads', []):
+            if thread.is_alive():
+                # daemon 线程不需要显式 join，等待其自然结束
+                pass
+        # 清空线程列表
+        self._background_threads = []
 
 
 # ======================================================================
-# 功能概览(固定文本)
+# 功能概览 (Markdown + 精致关闭)
 # ======================================================================
 class FeatureOverview(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("📋 功能概览")
+        self.setWindowTitle("\U0001f4cb 功能概览")
         self.setFixedSize(480, 620)
-        self.setWindowFlags(Qt.Dialog | Qt.WindowCloseButtonHint | Qt.FramelessWindowHint)
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
+
+        # 淡入动画
+        self._opacity = 0.0
+        self._fade_in_timer = QTimer(self)
+        self._fade_in_timer.timeout.connect(self._fade_in_step)
 
         outer = QFrame(self)
         outer.setGeometry(0, 0, 480, 620)
@@ -1365,107 +1611,129 @@ class FeatureOverview(QDialog):
         """)
 
         outer_layout = QVBoxLayout(outer)
-        outer_layout.setContentsMargins(24, 20, 24, 12)
-        outer_layout.setSpacing(10)
+        outer_layout.setContentsMargins(20, 16, 20, 12)
+        outer_layout.setSpacing(8)
 
-        # 顶部:关闭 + 标题
+        # ---- 顶栏：标题 + 关闭按钮（右上角） ----
         top_frame = QFrame()
         top_frame.setStyleSheet("background: transparent;")
         top = QHBoxLayout(top_frame)
-        top.setContentsMargins(0, 0, 0, 0)
-        close_btn = QPushButton("✕")
-        close_btn.setFixedSize(26, 26)
+        top.setContentsMargins(4, 0, 4, 0)
+
+        title = QLabel("\U0001f98a 仙狐功能一览")
+        title.setFont(QFont("Microsoft YaHei UI", 17, QFont.Bold))
+        title.setStyleSheet(f"color: {FOX_ORANGE}; background: transparent;")
+        top.addWidget(title)
+
+        top.addStretch()
+
+        close_btn = QPushButton("\u2715")
+        close_btn.setFixedSize(30, 30)
         close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setToolTip("关闭")
         close_btn.setStyleSheet(f"""
             QPushButton {{
-                background: rgba(255,180,120,0.3);
+                background: rgba(255,180,120,0.25);
                 color: {FOX_TEXT};
-                border: none;
-                border-radius: 13px;
-                font-size: 13px;
+                border: 1px solid rgba(232,196,160,0.3);
+                border-radius: 15px;
+                font-size: 14px;
                 font-weight: bold;
             }}
-            QPushButton:hover {{ background: rgba(255,100,80,0.4); color: #d44; }}
+            QPushButton:hover {{
+                background: rgba(255,90,70,0.35);
+                color: #d44;
+                border-color: rgba(255,90,70,0.5);
+            }}
+            QPushButton:pressed {{
+                background: rgba(255,60,40,0.5);
+            }}
         """)
-        close_btn.clicked.connect(self.close)
+        close_btn.clicked.connect(self._fade_out_close)
         top.addWidget(close_btn)
-        top.addStretch()
 
-        title = QLabel("🦊 仙狐桌宠功能一览")
-        title.setFont(QFont("Microsoft YaHei UI", 16, QFont.Bold))
-        title.setStyleSheet(f"color: {FOX_ORANGE}; background: transparent;")
-        title.setAlignment(Qt.AlignCenter)
-        top.addWidget(title)
-        top.addStretch()
         outer_layout.addWidget(top_frame)
 
-        # 可滚动区域
-        from PyQt5.QtWidgets import QScrollArea
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setStyleSheet(f"""
-            QScrollArea {{ background: transparent; border: none; }}
+        # ---- Markdown 内容区 ----
+        from PyQt5.QtWidgets import QTextEdit
+        md_view = QTextEdit()
+        md_view.setReadOnly(True)
+        md_view.setFrameShape(QFrame.NoFrame)
+        md_view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        md_view.setStyleSheet(f"""
+            QTextEdit {{
+                background: rgba(255,248,240,0.35);
+                border: none;
+                border-radius: 12px;
+                padding: 16px 20px;
+                color: {FOX_TEXT};
+                font-size: 13px;
+            }}
             QScrollBar:vertical {{
-                background: transparent; width: 6px;
+                background: rgba(0,0,0,0.03);
+                width: 6px;
+                border-radius: 3px;
             }}
             QScrollBar::handle:vertical {{
                 background: rgba(255,140,66,0.3);
-                border-radius: 3px; min-height: 30px;
+                border-radius: 3px;
+                min-height: 30px;
             }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
         """)
 
-        cards_widget = QWidget()
-        cards_widget.setStyleSheet("background: transparent;")
-        cl = QVBoxLayout(cards_widget)
-        cl.setContentsMargins(0, 0, 0, 0)
-        cl.setSpacing(8)
+        md_content = f"""## 💬 智能对话
 
-        cards = [
-            ("💬 AI 聊天", "和仙狐自由对话,她会智能回复你"),
-            ("🗣️ 语音输入", "点击 🎤 切换语音模式,长按 T 键说话"),
-            ("🌤 天气查询", "说「北京天气」仙狐马上告诉你"),
-            ("📊 系统状态", "说「电脑状态」查看 CPU、内存占用"),
-            ("📍 IP 查询", "说「我的IP」查看外网地址和归属地"),
-            ("💬 每日一言", "说「来句鸡汤」获取随机励志语录"),
-            ("🎲 今日运势", "说「今天运势」赛博占卜"),
-            ("🔐 密码生成", "说「生成密码」得到随机强密码"),
-            ("📁 打开程序", "说「打开 记事本」「打开 计算器」"),
-            ("📄 文件管理", "自然语言创建、删除、移动文件"),
-            ("🎨 仙狐陪伴", "Live2D 仙狐陪在你桌面上~"),
-            ("🔄 拖拽 & 缩放", "左键拖拽窗口,右下角缩放"),
-        ]
+和 **仙狐** 自由聊天，她认识所有工具。
+说 `北京天气`、`查IP`、`今日运势` 自动调用。
 
-        for icon_title, desc in cards:
-            card = QFrame()
-            card.setStyleSheet(f"""
-                QFrame {{
-                    background: rgba(255,248,240,0.6);
-                    border-radius: 10px;
-                    border: 1px solid {FOX_BORDER};
-                }}
-            """)
-            card_cl = QVBoxLayout(card)
-            card_cl.setContentsMargins(14, 8, 14, 8)
-            card_cl.setSpacing(2)
-            n = QLabel(icon_title)
-            n.setFont(QFont("Microsoft YaHei UI", 12, QFont.Bold))
-            n.setStyleSheet(f"color: {FOX_ORANGE}; background: transparent;")
-            d = QLabel(desc)
-            d.setFont(QFont("Microsoft YaHei UI", 10))
-            d.setStyleSheet(f"color: {FOX_SUBTEXT}; background: transparent;")
-            d.setWordWrap(True)
-            card_cl.addWidget(n)
-            card_cl.addWidget(d)
-            cl.addWidget(card)
+---
 
-        cl.addStretch()
-        scroll.setWidget(cards_widget)
-        outer_layout.addWidget(scroll, stretch=1)
+## 🛠️ 实用工具
 
-        close_all = QPushButton("知道啦 ✨")
-        close_all.setFixedHeight(40)
+| 功能 | 触发词 |
+|------|--------|
+| 🌤 天气查询 | 「`北京天气`」「`天津冷不冷`」 |
+| 📊 系统状态 | 「`电脑状态`」「`内存`」 |
+| 📍 IP 查询 | 「`我的IP`」「`外网地址`」 |
+| 🎲 今日运势 | 「`今天运势`」「`抽签`」 |
+| 💬 每日一言 | 「`来句鸡汤`」「`名言`」 |
+| 🔐 密码生成 | 「`生成密码`」 |
+| ⏰ 定时提醒 | 「`提醒我10分钟后喝水`」 |
+
+---
+
+## 📁 文件 & 程序
+
+| 操作 | 示例 |
+|------|------|
+| 打开文件夹 | 「`打开下载`」「`打开D盘`」 |
+| 打开程序 | 「`打开计算器`」「`打开微信`」 |
+| 创建文件 | 「`创建 test.txt`」 |
+| 删除文件 | 「`删除 temp.log`」 |
+| 移动文件 | 「`把a.txt移动到桌面`」 |
+
+---
+
+## 🗣️ 语音
+
+点击输入框左边的 **🎤** 按钮进入语音模式，长按 **T 键** 说话。
+
+---
+
+## 🎨 操作提示
+
+- **右键** 点击我打开菜单
+- **左键拖拽** 移动窗口
+- **右下角** 拖拽缩放
+"""
+
+        md_view.setMarkdown(md_content)
+        outer_layout.addWidget(md_view, stretch=1)
+
+        # ---- 底部关闭按钮 ----
+        close_all = QPushButton("\U0001f98a 知道啦")
+        close_all.setFixedHeight(42)
         close_all.setCursor(Qt.PointingHandCursor)
         close_all.setStyleSheet(f"""
             QPushButton {{
@@ -1473,19 +1741,52 @@ class FeatureOverview(QDialog):
                     stop:0 {FOX_ORANGE}, stop:1 {FOX_PEACH});
                 color: white;
                 border: none;
-                border-radius: 10px;
+                border-radius: 12px;
                 font-weight: bold;
                 font-size: 14px;
+                font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
             }}
             QPushButton:hover {{
                 background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
                     stop:0 {FOX_BTN_HOVER}, stop:1 {FOX_ACCENT});
             }}
+            QPushButton:pressed {{
+                background: {FOX_BTN_HOVER};
+            }}
         """)
-        close_all.clicked.connect(self.close)
+        close_all.clicked.connect(self._fade_out_close)
         outer_layout.addWidget(close_all)
 
-    # ---- 拖拽支持 ----
+        # ---- 拖拽 ----
+        self._dragging = False
+        self._drag_start = None
+
+        # 启动淡入
+        self._fade_in_timer.start(16)
+
+    # ---- 淡入 ----
+    def _fade_in_step(self):
+        self._opacity = min(1.0, self._opacity + 0.08)
+        self.setWindowOpacity(self._opacity)
+        if self._opacity >= 1.0:
+            self._fade_in_timer.stop()
+
+    # ---- 淡出关闭 ----
+    def _fade_out_close(self):
+        self._fade_in_timer.stop()
+        self._fade_out_timer = QTimer(self)
+        self._fade_out_timer.timeout.connect(self._fade_out_step)
+        self._fade_out_opacity = self.windowOpacity()
+        self._fade_out_timer.start(16)
+
+    def _fade_out_step(self):
+        self._fade_out_opacity = max(0, self._fade_out_opacity - 0.1)
+        self.setWindowOpacity(self._fade_out_opacity)
+        if self._fade_out_opacity <= 0:
+            self._fade_out_timer.stop()
+            self.close()
+
+    # ---- 拖拽 ----
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self._dragging = True
@@ -1494,7 +1795,7 @@ class FeatureOverview(QDialog):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if getattr(self, '_dragging', False):
+        if self._dragging:
             self.move(event.globalPos() - self._drag_start)
             event.accept()
 
@@ -1503,6 +1804,21 @@ class FeatureOverview(QDialog):
             self._dragging = False
             event.accept()
         super().mouseReleaseEvent(event)
+
+    # ---- 支持 Alt+F4 / 系统关闭淡出 ----
+    def closeEvent(self, event):
+        if getattr(self, '_fade_out_opacity', 1.0) <= 0:
+            super().closeEvent(event)
+            return
+        event.ignore()
+        self._fade_out_close()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self._fade_out_close()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 # ======================================================================
@@ -1563,3 +1879,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+input("按回车键退出...")

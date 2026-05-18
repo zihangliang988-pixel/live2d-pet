@@ -70,8 +70,8 @@ def _weather(city: str = "北京"):
         encoded = urllib.parse.quote(city)
         url = f"https://wttr.in/{encoded}?format=%C|%t|%w|%h|%p"
         req = urllib.request.Request(url, headers={'User-Agent': 'curl/8.0'})
-        resp = urllib.request.urlopen(req, timeout=8)
-        raw = resp.read().decode('utf-8').strip()
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            raw = resp.read().decode('utf-8').strip()
         parts = raw.split('|')
         return {
             "city": city,
@@ -151,8 +151,8 @@ def _myip():
             'https://httpbin.org/ip',
             headers={'User-Agent': 'curl/8.0'}
         )
-        resp = urllib.request.urlopen(req, timeout=8)
-        data = json.loads(resp.read())
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
         ip = data.get('origin', '未知')
         
         # 反向查归属地
@@ -161,8 +161,8 @@ def _myip():
                 f'https://ipapi.co/{ip}/json/',
                 headers={'User-Agent': 'curl/8.0'}
             )
-            resp2 = urllib.request.urlopen(req2, timeout=5)
-            loc = json.loads(resp2.read())
+            with urllib.request.urlopen(req2, timeout=5) as resp2:
+                loc = json.loads(resp2.read())
             return {
                 "ip": ip,
                 "city": loc.get('city', ''),
