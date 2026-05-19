@@ -67,10 +67,20 @@ def execute_tool_call(tool_call):
 def _weather(city: str = "北京"):
     """获取城市天气"""
     try:
+        # === [SECURITY FIX] 城市名安全校验，防止 URL 注入 ===
+        # 只允许中文、英文、数字和空格
+        import re
+        if not re.match(r'^[a-zA-Z\u4e00-\u9fa5\s\-]+$', city):
+            return {"city": city, "error": "城市名包含非法字符"}
+        
+        # 限制城市名长度
+        city = city.strip()[:20]
+        
         encoded = urllib.parse.quote(city)
         url = f"https://wttr.in/{encoded}?format=%C|%t|%w|%h|%p"
         req = urllib.request.Request(url, headers={'User-Agent': 'curl/8.0'})
-        with urllib.request.urlopen(req, timeout=8) as resp:
+        # === [FIX] 网络超时延长至 15 秒 ===
+        with urllib.request.urlopen(req, timeout=15) as resp:
             raw = resp.read().decode('utf-8').strip()
         parts = raw.split('|')
         return {
@@ -151,7 +161,8 @@ def _myip():
             'https://httpbin.org/ip',
             headers={'User-Agent': 'curl/8.0'}
         )
-        with urllib.request.urlopen(req, timeout=8) as resp:
+        # === [FIX] 网络超时延长至 15 秒 ===
+        with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read())
         ip = data.get('origin', '未知')
         
@@ -161,7 +172,8 @@ def _myip():
                 f'https://ipapi.co/{ip}/json/',
                 headers={'User-Agent': 'curl/8.0'}
             )
-            with urllib.request.urlopen(req2, timeout=5) as resp2:
+            # === [FIX] 网络超时延长至 15 秒 ===
+            with urllib.request.urlopen(req2, timeout=15) as resp2:
                 loc = json.loads(resp2.read())
             return {
                 "ip": ip,
@@ -289,6 +301,10 @@ def _password(length: int = 16):
     """生成随机密码"""
     import secrets
     import string
+    
+    # === [SECURITY FIX] 限制密码长度，防止内存问题 ===
+    length = max(8, min(length, 128))  # 限制在 8-128 位之间
+    
     chars = string.ascii_letters + string.digits + "!@#$%^&*"
     pwd = ''.join(secrets.choice(chars) for _ in range(length))
     return {"password": pwd, "length": length}

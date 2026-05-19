@@ -63,23 +63,46 @@ class LLMChatThread(QThread):
     finished = pyqtSignal(str)
     error = pyqtSignal(str)
 
-    def __init__(self, messages, model="qwen2.5:7b"):
+    def __init__(self, messages, model="qwen2.5:7b", timeout=20):
         super().__init__()
         self.messages = messages
         self.model = model
+        self.timeout = timeout  # 超时时间（秒）- 默认 20 秒
 
     def run(self):
-        try:
-            import ollama
-            response = ollama.chat(
-                model=self.model,
-                messages=self.messages,
-                stream=False,
-                options={"temperature": 0.7, "num_predict": 512}
-            )
-            self.finished.emit(response['message']['content'])
-        except Exception as e:
-            self.error.emit(str(e))
+        import threading
+        _result = {'response': None, 'error': None}
+        _completed = threading.Event()
+        
+        def chat_with_timeout():
+            try:
+                import ollama
+                response = ollama.chat(
+                    model=self.model,
+                    messages=self.messages,
+                    stream=False,
+                    options={"temperature": 0.7, "num_predict": 512},
+                    keep_alive=self.timeout
+                )
+                _result['response'] = response['message']['content']
+            except Exception as e:
+                _result['error'] = str(e)
+            finally:
+                _completed.set()
+        
+        # 启动线程
+        worker = threading.Thread(target=chat_with_timeout)
+        worker.start()
+        
+        # 等待完成或超时
+        if _completed.wait(timeout=self.timeout):
+            if _result['error']:
+                self.error.emit(_result['error'])
+            elif _result['response']:
+                self.finished.emit(_result['response'])
+        else:
+            # 超时
+            self.error.emit("⏰ 小狐仙思考太久了... 请重试或检查 Ollama 服务")
 
 
 # ======================================================================
@@ -88,81 +111,112 @@ class LLMChatThread(QThread):
 class ToolChatThread(QThread):
     finished = pyqtSignal(str)
     error = pyqtSignal(str)
-    reminder_scheduled = pyqtSignal(str, int)  # (提醒文本, 分钟数)
+    reminder_scheduled = pyqtSignal(str, int)  # (提醒文本，分钟数)
 
-    def __init__(self, messages, tools, conversation_ref=None, model="qwen2.5:7b"):
+    def __init__(self, messages, tools, conversation_ref=None, model="qwen2.5:7b", timeout=20):
         super().__init__()
         self.messages = messages
         self.tools = tools
         self.conversation_ref = conversation_ref  # 主线程对话历史引用
         self.model = model
+        self.timeout = timeout  # 超时时间（秒）- 默认 20 秒
 
     def run(self):
-        try:
-            import ollama
-            from tools import execute_tool_call
-            import json as json_mod
+        import threading
+        _result = {'response': None, 'error': None}
+        _completed = threading.Event()
+        
+        def chat_with_timeout():
+            try:
+                import ollama
+                from tools import execute_tool_call
+                import json as json_mod
 
-            # 第一轮：带工具调用
-            response = ollama.chat(
-                model=self.model,
-                messages=self.messages,
-                tools=self.tools,
-                stream=False,
-                options={"temperature": 0.7, "num_predict": 512}
-            )
+                # === [FIX] 工具调用轮次限制，防止无限循环 ===
+                max_tool_rounds = 2
+                current_round = 0
+                
+                while current_round < max_tool_rounds:
+                    current_round += 1
+                    
+                    # 调用 LLM（带超时）
+                    try:
+                        response = ollama.chat(
+                            model=self.model,
+                            messages=self.messages,
+                            tools=self.tools,
+                            stream=False,
+                            options={"temperature": 0.7, "num_predict": 512},
+                            keep_alive=self.timeout
+                        )
+                    except Exception as e:
+                        _result['error'] = f"LLM 调用失败：{str(e)}"
+                        _completed.set()
+                        return
 
-            msg = response['message']
+                    msg = response['message']
 
-            # 如果有工具调用，执行并返回结果
-            if msg.get('tool_calls'):
-                # 重要：先将 assistant 的 tool_calls 消息回写到主对话历史
-                # 这样上下文才完整：assistant 调用工具 -> tool 返回结果
-                if self.conversation_ref is not None:
-                    self.conversation_ref.append({
+                    # 如果没有工具调用，直接返回
+                    if not msg.get('tool_calls'):
+                        _result['response'] = msg['content']
+                        _completed.set()
+                        return
+
+                    # 重要：先将 assistant 的 tool_calls 消息回写到主对话历史
+                    if self.conversation_ref is not None:
+                        self.conversation_ref.append({
+                            "role": "assistant",
+                            "content": msg.get('content', ''),
+                            "tool_calls": msg['tool_calls']
+                        })
+                    
+                    # 执行所有工具调用
+                    for tc in msg['tool_calls']:
+                        result = execute_tool_call(tc)
+                        tool_name = tc['function']['name']
+                        # Ollama 需要 name 字段来识别是哪个工具的返回
+                        self.messages.append({"role": "tool", "name": tool_name, "content": result})
+                        # 回写到主线程对话历史
+                        if self.conversation_ref is not None:
+                            self.conversation_ref.append({"role": "tool", "name": tool_name, "content": result})
+
+                        # 检查是否有提醒工具的调用
+                        if tc['function']['name'] == 'set_reminder':
+                            try:
+                                args = json_mod.loads(tc['function']['arguments'])
+                                remind_text = args.get('text', '时间到了！')
+                                remind_minutes = int(args.get('minutes', 5))
+                                self.reminder_scheduled.emit(remind_text, remind_minutes)
+                            except Exception as e:
+                                print(f"[WARN] 提醒参数解析失败: {e}")
+
+                    # 添加引导消息，让 LLM 继续处理
+                    self.messages.append({
                         "role": "assistant",
-                        "content": msg.get('content', ''),
-                        "tool_calls": msg['tool_calls']
+                        "content": f"工具调用第 {current_round} 轮完成。如果还需要调用工具请继续，否则请用温柔可爱的语气自然地告诉用户结果。"
                     })
                 
-                for tc in msg['tool_calls']:
-                    result = execute_tool_call(tc)
-                    tool_name = tc['function']['name']
-                    # Ollama 需要 name 字段来识别是哪个工具的返回
-                    self.messages.append({"role": "tool", "name": tool_name, "content": result})
-                    # 回写到主线程对话历史
-                    if self.conversation_ref is not None:
-                        self.conversation_ref.append({"role": "tool", "name": tool_name, "content": result})
-
-                    # 检查是否有提醒工具的调用
-                    if tc['function']['name'] == 'set_reminder':
-                        try:
-                            args = json_mod.loads(tc['function']['arguments'])
-                            remind_text = args.get('text', '时间到了！')
-                            remind_minutes = int(args.get('minutes', 5))
-                            self.reminder_scheduled.emit(remind_text, remind_minutes)
-                        except Exception:
-                            pass
-
-                # 添加一个引导消息，让 LLM 用对话式语气回复
-                self.messages.append({
-                    "role": "assistant",
-                    "content": "收到工具返回的信息了，现在请用温柔可爱的语气自然地告诉用户，像一个真实的朋友聊天一样。不要机械地罗列数据，要把结果融入对话中，适当加入关心的话语和表情符号。"
-                })
-
-                # 第二轮：拿最终回复
-                response2 = ollama.chat(
-                    model=self.model,
-                    messages=self.messages,
-                    stream=False,
-                    options={"temperature": 0.7, "num_predict": 512}
-                )
-                self.finished.emit(response2['message']['content'])
-            else:
-                self.finished.emit(msg['content'])
-
-        except Exception as e:
-            self.error.emit(str(e))
+                # === [FIX] 超过最大轮次，强制返回 ===
+                _result['error'] = f"工具调用超过最大轮次 ({max_tool_rounds})，终止执行"
+                _completed.set()
+                
+            except Exception as e:
+                _result['error'] = str(e)
+                _completed.set()
+        
+        # 启动线程
+        worker = threading.Thread(target=chat_with_timeout)
+        worker.start()
+        
+        # 等待完成或超时
+        if _completed.wait(timeout=self.timeout):
+            if _result['error']:
+                self.error.emit(_result['error'])
+            elif _result['response']:
+                self.finished.emit(_result['response'])
+        else:
+            # 超时
+            self.error.emit("⏰ 小狐仙思考太久了... 请重试或检查 Ollama 服务")
 
 
 # ======================================================================
@@ -914,13 +968,14 @@ class FoxChatDialog(QDialog):
                             elif not kb.is_pressed('t') and self._voice_pressed:
                                 self._voice_pressed = False
                                 QTimer.singleShot(0, self._stop_voice_capture)
-                        except:
-                            pass
+                        except Exception as e:
+                            print(f"[WARN] 按键检测异常: {e}")
                     time_module.sleep(0.05)
             except ImportError:
+                # keyboard 库未安装，属于正常现象，不做日志
                 pass
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[WARN] 键盘监听线程异常: {e}")
 
         # 保存线程引用，确保资源管理
         t = threading.Thread(target=listen_keys, daemon=True)
@@ -1066,12 +1121,15 @@ class FoxChatDialog(QDialog):
         """显示打字指示器"""
         self.typing_indicator.setVisible(True)
         self.typing_indicator.setText("仙狐正在思考中... 🦊💭")
+        self._typing_active = True  # [FIX] 标记动画活跃，防止窗口关闭后继续运行
         
         # 动画效果：三个跳动的小圆点
         QTimer.singleShot(500, self._animate_typing)
 
     def _animate_typing(self):
         """打字指示器动画"""
+        if not getattr(self, '_typing_active', False):  # [FIX] 窗口已关闭则停止动画
+            return
         states = ["仙狐正在思考中... 🦊", "仙狐正在思考中.. 🦊", "仙狐正在思考中. 🦊"]
         self._typing_state = getattr(self, '_typing_state', 0)
         self.typing_indicator.setText(states[self._typing_state % 3])
@@ -1080,6 +1138,7 @@ class FoxChatDialog(QDialog):
 
     def _hide_typing_indicator(self):
         """隐藏打字指示器"""
+        self._typing_active = False  # [FIX] 先停止动画，避免在销毁UI时被触发
         self.typing_indicator.setVisible(False)
         if hasattr(self, '_typing_state'):
             delattr(self, '_typing_state')
@@ -1103,6 +1162,20 @@ class FoxChatDialog(QDialog):
         self._add_msg("assistant", message)
         self.send_btn.setEnabled(True)
         self.send_btn.setText("🚀 发送")
+
+    def _limit_conversation_history(self, max_length=20):
+        """
+        限制对话历史总长度，防止内存泄漏
+        保留 system prompt + 最近 max_length-1 条消息
+        """
+        if len(self.conversation) <= max_length:
+            return
+        
+        # 保留 system prompt (索引 0) + 最近的 max_length-1 条
+        system_prompt = self.conversation[0]
+        recent_messages = self.conversation[-(max_length-1):]
+        self.conversation = [system_prompt] + recent_messages
+        # print(f"[DEBUG] 上下文已修剪：{len(self.conversation)} 条")
 
     def _process_input(self, text):
         # 修复 3：检查是否有待确认的创建操作
@@ -1134,14 +1207,54 @@ class FoxChatDialog(QDialog):
                 self.send_btn.setText("🚀 发送")
                 return
         
+        # === [SECURITY FIX] 检查是否有待确认的删除操作 ===
+        if hasattr(self, '_pending_delete') and self._pending_delete:
+            pending = self._pending_delete
+            target = pending['target']
+            file_path = pending.get('file_path')  # 获取保存的完整路径
+            
+            if '确认删除' in text or '确认' in text:
+                # 用户确认删除，直接使用保存的完整路径
+                if file_path and os.path.exists(file_path):
+                    # 直接删除文件（使用完整路径）
+                    r = self.file_manager.delete_file_by_path(file_path)
+                    if r["success"]:
+                        self._add_msg("assistant", f"✅ 已删除：{file_path}\\n\\n⚠️ 下次操作要小心哦~")
+                    else:
+                        self._add_msg("assistant", f"❌ {r['message']}")
+                else:
+                    self._add_msg("assistant", f"❌ 文件不存在或已被删除：{file_path}")
+            elif '取消' in text or '算了' in text:
+                # 用户取消删除
+                self._add_msg("assistant", "✅ 已取消删除操作\\n\\n吓我一跳，还以为你真要删呢~ 😅")
+            else:
+                # 用户输入不明确，再次提示
+                self._add_msg("assistant", 
+                    f"🤔 请明确回复「确认删除」或「取消」哦~")
+                self.send_btn.setEnabled(True)
+                self.send_btn.setText("🚀 发送")
+                return
+            
+            # 清除待确认状态
+            delattr(self, '_pending_delete')
+            self.send_btn.setEnabled(True)
+            self.send_btn.setText("🚀 发送")
+            return
+        
         def on_command(result):
             if result.get("success") and result.get("action") != "unknown":
                 self._execute_command(result)
             else:
                 self._chat_with_llm(text)
 
+        # === [MOD 2026-05-19] 命令预处理：清洗口语，提高识别率 ===
+        # 回滚：删掉下面这行即可
+        from llm_parser import preprocess_input
+        cleaned = preprocess_input(text)
+        # =========================================================
+
         if self.llm_parser:
-            self.cmd_thread = CommandThread(text, self.llm_parser)
+            self.cmd_thread = CommandThread(cleaned, self.llm_parser)
             self.cmd_thread.finished.connect(on_command)
             self.cmd_thread.start()
         else:
@@ -1149,7 +1262,15 @@ class FoxChatDialog(QDialog):
 
     def _resolve_context_directory(self, directory_str):
         """解析上下文目录引用，将"这个文件夹"等转换为实际路径"""
-        context_phrases = ['这个文件夹', '当前文件夹', '刚才打开的文件夹', '刚才的文件夹']
+        # === [FIX] 扩展上下文短语列表 ===
+        context_phrases = [
+            # 原有短语
+            '这个文件夹', '当前文件夹', '刚才打开的文件夹', '刚才的文件夹',
+            # 新增短语
+            '这里', '这里面', '这里头', '这儿', '这儿的里面',
+            '当前目录', '这个目录', '当前路径', '这里的路径',
+            '刚才的目录', '这个位置', '当前位置'
+        ]
         if directory_str in context_phrases:
             return self._last_opened_folder
         return directory_str
@@ -1157,7 +1278,7 @@ class FoxChatDialog(QDialog):
     def _execute_command(self, result):
         # 边界检查:result 为 None 或缺少 action
         if not result or not result.get("action"):
-            self._add_msg("assistant", "😅 命令解析失败,请重试")
+            self._add_msg("assistant", "😅 命令解析失败，请重试")
             self.send_btn.setEnabled(True)
             self.send_btn.setText("发送")
             return
@@ -1165,8 +1286,16 @@ class FoxChatDialog(QDialog):
         action = result.get("action")
         target_type = result.get("target_type")  # 新增：目标类型
 
-        target = (result.get("target") or "").strip()
-        destination = (result.get("destination") or "").strip()  # 修复 1：统一使用 destination
+        # === [SECURITY FIX] 路径安全校验 ===
+        def sanitize_target(target: str) -> str:
+            """防止路径遍历攻击"""
+            # 移除危险字符
+            target = target.replace('..', '').replace('/', '').replace('\\', '')
+            # 只保留文件名部分
+            return os.path.basename(target)
+        
+        target = sanitize_target(result.get("target") or "").strip()
+        destination = (result.get("destination") or "").strip()
         directory = (result.get("directory") or "").strip()
         
         # 解析上下文目录引用
@@ -1221,15 +1350,43 @@ class FoxChatDialog(QDialog):
                 if not search_dir and self._last_opened_folder:
                     search_dir = self._last_opened_folder
                 
-                r = self.file_manager.delete_file(target, directory=search_dir)
-                
-                # 修复：不要二次尝试全局搜索，避免误删同名文件
-                # 如果没找到，直接给出明确提示
-                if not r["success"]:
-                    if search_dir:
-                        r["message"] = f"在「{search_dir}」中没找到 '{target}' 哦~ 请确认文件名或打开正确的文件夹"
+                # === [FIX] 先查找文件，获取完整路径 ===
+                file_path = None
+                if search_dir:
+                    # 在指定目录下找
+                    candidate = os.path.join(search_dir.rstrip('\\/'), target)
+                    if os.path.exists(candidate):
+                        file_path = candidate
                     else:
-                        r["message"] = f"没找到 '{target}' 哦。请先打开一个文件夹，或者说清楚文件位置~"
+                        # 在目录内搜索
+                        file_path = self.file_manager._find_file_in_dir(target, search_dir)
+                else:
+                    # 全局搜索
+                    file_path = self.file_manager._find_file(target)
+                
+                # 如果找不到文件，直接提示
+                if not file_path or not os.path.exists(file_path):
+                    self._add_msg("assistant", f"😅 没找到 '{target}' 哦~")
+                    self.send_btn.setEnabled(True)
+                    self.send_btn.setText("🚀 发送")
+                    r = {"success": False, "message": "文件不存在"}
+                    return
+                
+                # === [SECURITY FIX] 删除操作必须二次确认，显示完整路径 ===
+                self._add_msg("assistant", 
+                    f"⚠️【危险操作】确定要删除以下文件吗？\\n\\n"
+                    f"📄 文件名：{target}\\n"
+                    f"📁 完整路径：{file_path}\\n\\n"
+                    f"❗ 删除后将移到回收站！\\n"
+                    f"请回复「确认删除」来执行，或回复「取消」放弃")
+                # 设置待确认状态，保存完整路径
+                self._pending_delete = {
+                    "target": target,
+                    "target_type": target_type,
+                    "file_path": file_path,  # 保存完整路径
+                    "search_dir": search_dir
+                }
+                r = {"success": False, "message": "等待用户确认"}
 
             elif action == "move":
                 if not target:
@@ -1298,8 +1455,8 @@ class FoxChatDialog(QDialog):
                     result = handler()
                     if result and 'error' not in str(result).lower():
                         return result
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[WARN] 快捷命令执行失败: {e}")
         
         # ========== 第 2 层：增强关键词匹配（<50ms）==========
         # 扩展正则 + 同义词表，覆盖更多自然表达
@@ -1422,6 +1579,8 @@ class FoxChatDialog(QDialog):
                 self.conversation.append(user_message)
                 self.conversation.append(tool_message)
                 self.conversation.append({"role": "assistant", "content": cleaned})
+                # === [FIX] 限制上下文总长度 ===
+                self._limit_conversation_history()
                 self.send_btn.setEnabled(True)
                 self.send_btn.setText("🚀 发送")
             def on_error(err):
@@ -1433,6 +1592,8 @@ class FoxChatDialog(QDialog):
                 self.conversation.append(user_message)
                 self.conversation.append(tool_message)
                 self.conversation.append({"role": "assistant", "content": error_msg})
+                # === [FIX] 限制上下文总长度 ===
+                self._limit_conversation_history()
                 self.send_btn.setEnabled(True)
                 self.send_btn.setText("🚀 发送")
             try:
@@ -1457,6 +1618,8 @@ class FoxChatDialog(QDialog):
             # 成功后再添加 user 和 assistant 消息到上下文
             self.conversation.append(user_message)
             self.conversation.append({"role": "assistant", "content": cleaned})
+            # === [FIX] 限制上下文总长度，防止内存泄漏 ===
+            self._limit_conversation_history()
             self.send_btn.setEnabled(True)
             self.send_btn.setText("🚀 发送")
 
@@ -1468,6 +1631,8 @@ class FoxChatDialog(QDialog):
             # 出错时也记录，但标记为错误回复
             self.conversation.append(user_message)
             self.conversation.append({"role": "assistant", "content": error_msg})
+            # === [FIX] 限制上下文总长度 ===
+            self._limit_conversation_history()
             self.send_btn.setEnabled(True)
             self.send_btn.setText("🚀 发送")
 
@@ -1840,8 +2005,9 @@ class DesktopPetApp:
             profile = QWebEngineProfile.defaultProfile()
             profile.setCachePath(qwc_dir)
             profile.setPersistentStoragePath(qwc_dir)
-        except Exception:
-            pass
+        except Exception as e:
+            # 缓存目录创建失败不影响核心功能
+            print(f"[WARN] WebEngine 缓存设置失败: {e}")
 
         self.pet = FoxPet()
         screen = self.app.primaryScreen()

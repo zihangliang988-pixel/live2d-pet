@@ -668,9 +668,25 @@ class FileManager:
         if not os.path.exists(file_path):
             return {"success": False, "message": f"文件 '{name}' 不存在或已被删除"}
         
+        # 调用直接删除方法
+        return self.delete_file_by_path(file_path)
+
+    def delete_file_by_path(self, file_path: str) -> Dict:
+        """直接使用完整路径删除文件（移到回收站）"""
+        # 验证文件确实存在
+        if not os.path.exists(file_path):
+            return {"success": False, "message": f"文件不存在或已被删除：{file_path}"}
+        
         try:
             import ctypes
             from ctypes import wintypes
+            
+            # === [FIX] 兼容不同 Python 版本的 wintypes ===
+            # FILEOP_FLAGS 在某些 Python 版本中不存在，使用 c_uint 替代
+            if hasattr(wintypes, 'FILEOP_FLAGS'):
+                FILEOP_FLAGS = wintypes.FILEOP_FLAGS
+            else:
+                FILEOP_FLAGS = ctypes.c_uint
             
             # 使用 SHFileOperationW 将文件移到回收站
             class SHFILEOPSTRUCTW(ctypes.Structure):
@@ -679,7 +695,7 @@ class FileManager:
                     ("wFunc", wintypes.UINT),
                     ("pFrom", wintypes.LPCWSTR),
                     ("pTo", wintypes.LPCWSTR),
-                    ("fFlags", wintypes.FILEOP_FLAGS),
+                    ("fFlags", FILEOP_FLAGS),  # 使用兼容的类型
                     ("fAnyOperationsAborted", wintypes.BOOL),
                     ("hNameMappings", wintypes.LPVOID),
                     ("lpszProgressTitle", wintypes.LPCWSTR)
@@ -693,7 +709,7 @@ class FileManager:
             fileop = SHFILEOPSTRUCTW()
             fileop.hwnd = None
             fileop.wFunc = 3  # FO_DELETE
-            fileop.pFrom = ctypes.c_wchar_p(file_path + '\0')  # 必须以双null结尾
+            fileop.pFrom = ctypes.c_wchar_p(file_path + '\0')  # 必须以双 null 结尾
             fileop.pTo = None
             fileop.fFlags = 0x40 | 0x10 | 0x4  # FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT
             fileop.fAnyOperationsAborted = False
@@ -703,32 +719,11 @@ class FileManager:
             result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(fileop))
             
             if result != 0:
-                return {"success": False, "message": f"删除失败，错误码：{result}"}
+                return {"success": False, "message": f"删除失败：错误代码 {result}"}
             
-            # 验证文件是否真的被删除了（移到回收站）
-            if os.path.exists(file_path):
-                # 尝试直接删除（绕过回收站）
-                try:
-                    if os.path.isfile(file_path):
-                        os.remove(file_path)
-                    else:
-                        import shutil
-                        shutil.rmtree(file_path)
-                except Exception as e2:
-                    return {"success": False, "message": f"文件 '{name}' 删除失败，请检查权限或手动删除"}
-            
-            return {"success": True, "message": f"已将 {name} 移到回收站"}
+            return {"success": True, "message": f"已删除：{file_path}"}
         except Exception as e:
-            # 作为最后的备用方案，直接删除
-            try:
-                if os.path.isfile(file_path):
-                    os.remove(file_path)
-                else:
-                    import shutil
-                    shutil.rmtree(file_path)
-                return {"success": True, "message": f"已删除 {name}"}
-            except Exception as e2:
-                return {"success": False, "message": f"删除失败：{str(e2)}"}
+            return {"success": False, "message": f"删除出错：{str(e)}"}
 
     def move_file(self, name: str, target_dir: str) -> Dict:
         file_path = self._find_file(name)
